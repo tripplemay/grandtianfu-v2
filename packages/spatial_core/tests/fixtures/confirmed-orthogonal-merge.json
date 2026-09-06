@@ -54,6 +54,15 @@
       "confidence": 1.0
     }
   ],
-  "cameras": [],
+  "cameras": [
+    {
+      "id": "camera-main",
+      "projection": "perspective",
+      "image_size": {"width": 800, "height": 600},
+      "position": {"x": 3000, "y": 1000, "z": 1500},
+      "look_at": {"x": 3000, "y": 2800, "z": 700},
+      "up": {"x": 0, "y": 0, "z": 1}
+    }
+  ],
   "materials": []
 }

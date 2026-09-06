@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.staticfiles import StaticFiles
 
+from .rendering import RenderUnavailable, render_revision
 from .revisions import (
     InvalidModel,
     MissingRevision,
@@ -77,6 +78,10 @@ def create_app(
     async def integrity_handler(_: Request, exc: StorageIntegrityError):
         return JSONResponse(status_code=500, content={"detail": str(exc), "code": "storage_integrity_error"})
 
+    @app.exception_handler(RenderUnavailable)
+    async def render_handler(_: Request, exc: RenderUnavailable):
+        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "render_unavailable"})
+
     @app.get("/api/models")
     def list_models():
         return store.list_models()
@@ -93,6 +98,21 @@ def create_app(
     @app.get("/api/models/{model_id}/revisions/{revision}")
     def get_revision(model_id: str, revision: int):
         return store.get(model_id, revision)
+
+    @app.post("/api/models/{model_id}/renders")
+    async def render(model_id: str, request: Request):
+        body = await _body(request, {"revision", "width", "height"})
+        revision = body["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise InvalidModel("revision must be a positive integer")
+        envelope = await run_in_threadpool(store.get, model_id, revision)
+        model = envelope["model"]
+        if model["status"] not in {"confirmed", "locked"}:
+            raise InvalidModel("only confirmed or locked revisions can be rendered")
+        root = os.environ.get("GT_RENDER_ROOT", str(ROOT / "artifacts/renders"))
+        manifest = await run_in_threadpool(render_revision, model, root, width=body["width"], height=body["height"])
+        manifest["artifact_url"] = f"/render-artifacts/{model_id}/r{revision}-{envelope['hash'][:16]}"
+        return manifest
 
     @app.post("/api/models/{model_id}/validate")
     async def validate(model_id: str, request: Request):
@@ -113,6 +133,9 @@ def create_app(
     assets = dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets, follow_symlink=False), name="assets")
+    render_root = Path(os.environ.get("GT_RENDER_ROOT", str(ROOT / "artifacts/renders")))
+    render_root.mkdir(parents=True, exist_ok=True)
+    app.mount("/render-artifacts", StaticFiles(directory=render_root, follow_symlink=False), name="render-artifacts")
 
     @app.get("/", include_in_schema=False)
     def index():

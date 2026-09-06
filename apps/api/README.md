@@ -1,6 +1,6 @@
 # Stage 2 Workbench API
 
-本目录提供 v2 阶段 2 的本地工作台 API。它只负责 SpatialModel 版本、校验和本地持久化；不包含生产认证、部署、计费、AI 调用或 3D 渲染。
+本目录提供 v2 阶段 2/3 的本地工作台 API，负责 SpatialModel 版本、校验、本地持久化和 CPU 3D worker 调度；不包含生产认证、部署、计费或 AI 调用。
 
 ## 本地启动
 
@@ -34,6 +34,9 @@ GT_DB_PATH=/tmp/grandtianfu-workbench.sqlite3 \
 | `GET` | `/api/models/{model_id}/revisions/{revision}` | 返回指定不可变版本 |
 | `POST` | `/api/models/{model_id}/validate` | 只校验，不写数据库 |
 | `POST` | `/api/models/{model_id}/revisions` | CAS 保存或确认并追加新版本 |
+| `POST` | `/api/models/{model_id}/renders` | 在独立 CPU worker 中渲染指定 confirmed/locked revision |
+
+渲染请求格式为 `{ "revision": 1, "width": 800, "height": 600 }`，宽高范围为 1..2048。响应包含固定 `cpu-perspective-v1` 相机、四类通道文件和 artifact URL；渲染目录可通过 `GT_RENDER_ROOT` 指定，默认是 `artifacts/renders`。
 
 保存请求格式：
 

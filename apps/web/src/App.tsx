@@ -53,6 +53,12 @@ type Dialog = {
   command: string;
   action: () => void;
 };
+type RenderManifest = {
+  artifact_url: string;
+  camera: { width: number; height: number };
+  files: { color: string };
+  model_revision: number;
+};
 const statusNames: Record<string, string> = {
   draft: "草稿",
   confirmed: "已确认",
@@ -233,6 +239,8 @@ export default function App() {
   const [addKind, setAddKind] = useState<keyof typeof catalog>("coffee_table");
   const [invalidFields, setInvalidFields] = useState<Set<string>>(new Set());
   const [fieldEpoch, setFieldEpoch] = useState(0);
+  const [renderManifest, setRenderManifest] = useState<RenderManifest | null>(null);
+  const [renderBusy, setRenderBusy] = useState(false);
   const reportField = useCallback(
     (key: string, valid: boolean) =>
       setInvalidFields((current) => {
@@ -436,6 +444,25 @@ export default function App() {
     }
   }
 
+  async function render3d() {
+    if (!model || !["confirmed", "locked"].includes(model.status) || renderBusy) return;
+    setRenderBusy(true);
+    setError("");
+    try {
+      const result = await request<RenderManifest>(`/api/models/${encodeURIComponent(model.model_id)}/renders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revision: model.revision, width: 800, height: 600 }),
+      });
+      setRenderManifest(result);
+      setNotice(`v${result.model_revision} 3D 渲染完成`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRenderBusy(false);
+    }
+  }
+
   function choose(item: Selection) {
     if (invalidFields.size)
       setDialog({
@@ -613,6 +640,15 @@ export default function App() {
           >
             <Check size={16} />
             确认版本
+          </button>
+          <button
+            className="button"
+            disabled={renderBusy || !model || !["confirmed", "locked"].includes(model.status)}
+            onClick={() => void render3d()}
+            title="对当前已确认版本启动 CPU 3D 渲染"
+          >
+            {renderBusy ? <LoaderCircle className="spin" size={16} /> : <Layers size={16} />}
+            {renderBusy ? "渲染中" : "生成 3D"}
           </button>
         </div>
       </header>
@@ -868,6 +904,15 @@ export default function App() {
               onEdit={edit}
               readOnly={readOnly || invalidFields.size > 0 || !!dialog}
             />
+            {renderManifest && (
+              <section className="render-preview" aria-label="三维渲染预览">
+                <div className="render-preview-heading">
+                  <span className="view-tab">CPU 3D 预览</span>
+                  <span className="muted">v{renderManifest.model_revision} · {renderManifest.camera.width}×{renderManifest.camera.height}</span>
+                </div>
+                <img src={`${renderManifest.artifact_url}/${renderManifest.files.color}`} alt="空间模型三维渲染结果" />
+              </section>
+            )}
           </section>
 
           <aside className="properties-pane">

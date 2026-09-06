@@ -40,13 +40,18 @@
 
 ## 阶段 3：2D 到 3D 场景
 
+状态：**实现完成，等待独立复核与用户确认**。确认前不得进入位图导入、家具求解或 AI 增强。
+
 目标：从已确认平面生成可编辑 3D 场景。
 
 - 实现墙体、地面、顶面、门窗和参数化家具简模。
 - 输出固定相机下的基础渲染、深度、法线和实例 mask。
-- 对 CPU worker 做耗时、内存和并发测试。
+- 固定 `X east / Y south / Z up` 和 SVG Y 向下到右手 3D 的显式转换，见 `docs/decisions/0003-stage-3-coordinate-render-contract.md`。
+- 固定 color/depth/normal/instance-mask 原始通道格式、实例 ID 表和渲染 manifest，见 `docs/specs/stage-3-cpu-3d.md`。
+- 在独立 CPU worker 做耗时、内存、超时、确定性和并发测试；首期预算为默认 1024×768 P95 `<=30s`、单任务硬超时 `120s`、峰值 RSS `<=2GB`，最终以 spike ADR 冻结。
+- 本阶段不接入位图、AI、实拍标定和自动家具布局。
 
-阶段门：2D 坐标到 3D 再到相机投影无漂移；同一输入可复现；每件家具可按 instance ID 回溯。
+阶段门：2D 坐标到 3D 再到相机投影无漂移（round-trip `0mm`、投影 `<=0.5px`）；同一输入重复渲染 hash 一致；每件家具有非空且唯一 instance mask；四类通道和 manifest 格式正确；CPU 预算、失败阻断和资源指标有真实 fixture 记录。阶段门未通过时停止后续 AI 和自动识别工作。
 
 ## 阶段 4：位图/PDF 导入与人工校核
 

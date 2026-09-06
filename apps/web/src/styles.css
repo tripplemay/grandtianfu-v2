@@ -403,6 +403,26 @@ p {
   min-width: 0;
   position: relative;
 }
+.render-preview {
+  border-top: 1px solid var(--line);
+  background: #f7f9f8;
+  padding: 12px 16px 16px;
+  display: grid;
+  gap: 8px;
+}
+.render-preview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.render-preview img {
+  width: min(100%, 720px);
+  max-height: 360px;
+  object-fit: contain;
+  object-position: left top;
+  background: #ecefed;
+  border: 1px solid var(--line);
+}
 .plan-heading {
   height: 54px;
   display: flex;

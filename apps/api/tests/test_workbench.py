@@ -220,6 +220,27 @@ def test_body_type_and_size_limits(client, model):
     assert response.status_code == 422
 
 
+def test_render_confirmed_revision_publishes_raw_artifacts(client, model, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_RENDER_ROOT", str(tmp_path / "renders"))
+    response = client.post(endpoint(model) + "/renders", json={"revision": 1, "width": 320, "height": 240})
+    assert response.status_code == 200, response.text
+    manifest = response.json()
+    assert manifest["camera"]["projection"] == "cpu-perspective-v1"
+    assert manifest["camera"]["width"] == 320
+    assert manifest["camera"]["height"] == 240
+    assert manifest["artifact_url"].startswith("/render-artifacts/")
+    for filename in manifest["files"].values():
+        assert (tmp_path / "renders" / model["model_id"] / f"r1-{manifest['model_hash'][:16]}" / filename).is_file()
+
+
+def test_render_rejects_draft_and_invalid_dimensions(client, model):
+    current = latest(client, model)
+    body = save_body(current)
+    draft = client.post(endpoint(model) + "/revisions", json=body).json()
+    assert client.post(endpoint(model) + "/renders", json={"revision": draft["model"]["revision"], "width": 320, "height": 240}).status_code == 422
+    assert client.post(endpoint(model) + "/renders", json={"revision": 1, "width": 0, "height": 240}).status_code == 422
+
+
 def test_global_numeric_bounds_apply_to_all_model_values(client, model):
     current = latest(client, model)
     for number in (1_000_000_001, -1_000_000_001, 1e308, -1e308):
