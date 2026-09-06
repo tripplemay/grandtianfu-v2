@@ -349,7 +349,8 @@ export function PlanCanvas({
 
   const onPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (!svgRef.current) return;
-    if (tool !== "pan") return;
+    if (tool !== "pan" || event.button !== 0) return;
+    event.preventDefault();
     svgRef.current.setPointerCapture(event.pointerId);
     const inverseCtm = svgRef.current.getScreenCTM()?.inverse() ?? null;
     panRef.current = {
@@ -436,6 +437,8 @@ export function PlanCanvas({
     event: ReactPointerEvent<SVGGElement>,
     item: Furniture,
   ) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
     onSelect({ kind: "furniture", id: item.id });
     if (tool === "pan") return;
     event.stopPropagation();

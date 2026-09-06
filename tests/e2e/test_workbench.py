@@ -152,6 +152,19 @@ def test_drag_after_zoom_pan_undo_and_save(workbench):
     )
     assert head(page) == original
     page.get_by_role("button", name="选择家具", exact=True).click()
+    expect(page.get_by_role("button", name="选择家具", exact=True)).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.evaluate("""() => {
+      window.dragEvents = [];
+      for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'dragstart', 'lostpointercapture']) {
+        document.addEventListener(kind, event => window.dragEvents.push({
+          kind, x: event.clientX, y: event.clientY, buttons: event.buttons,
+          target: event.target.closest('[data-testid]')?.getAttribute('data-testid') || event.target.tagName,
+          prevented: event.defaultPrevented,
+        }));
+      }
+    }""")
     sofa = page.get_by_test_id("furniture-sofa-1")
     bounds = sofa.bounding_box()
     scale = surface.evaluate("svg => svg.getScreenCTM().a")
@@ -162,9 +175,16 @@ def test_drag_after_zoom_pan_undo_and_save(workbench):
     page.mouse.up()
     expected_x = round((1500 + 31 / scale) * 100) / 100
     expected_y = round((3300 + 9 / scale) * 100) / 100
-    expect(page.get_by_role("spinbutton", name="X", exact=True)).to_have_value(
-        str(expected_x).removesuffix(".0")
-    )
+    try:
+        expect(page.get_by_role("spinbutton", name="X", exact=True)).to_have_value(
+            str(expected_x).removesuffix(".0")
+        )
+    except AssertionError:
+        print("Drag diagnostics:", page.evaluate("window.dragEvents"), "bounds:", bounds)
+        image_dir = ROOT / "artifacts/e2e"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(image_dir / "drag-failure.png"))
+        raise
     page.get_by_role("button", name="撤销", exact=True).click()
     expect(page.get_by_role("spinbutton", name="X", exact=True)).to_have_value("1500")
     page.get_by_role("button", name="重做", exact=True).click()

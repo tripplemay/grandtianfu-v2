@@ -59,3 +59,12 @@ jobs:
 
       - name: Run browser tests
         run: uv run pytest tests/e2e -q
+
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-2-browser-evidence
+          path: artifacts/e2e/
+          if-no-files-found: ignore
+          retention-days: 7
