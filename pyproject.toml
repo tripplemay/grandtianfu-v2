@@ -10,11 +10,18 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.15,<1", "playwright>=1.55,<2"]
+api = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/spatial_core/tests"]
-pythonpath = ["packages/spatial_core"]
+testpaths = ["packages/spatial_core/tests", "packages/scene3d/tests", "apps/api/tests"]
+pythonpath = [".", "packages/spatial_core", "packages/scene3d"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
 
 [tool.setuptools.packages.find]
-where = ["packages/spatial_core"]
+where = ["packages/spatial_core", "packages/scene3d"]
+include = ["spatial_core*", "scene3d*"]
+exclude = ["tests*", "*.tests*"]

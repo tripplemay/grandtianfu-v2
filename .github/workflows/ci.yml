@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --extra dev --extra api
+
+      - name: Check Python tests
+        run: uv run pytest -q
+
+      - name: Check Python lint
+        run: uv run ruff check apps/api
+
+      - name: Install frontend dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build frontend
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: uv run pytest tests/e2e -q
+
+      - name: Preserve browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-2-browser-evidence
+          path: artifacts/e2e/
+          if-no-files-found: ignore
+          retention-days: 7
