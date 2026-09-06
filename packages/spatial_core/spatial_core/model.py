@@ -117,7 +117,7 @@ def _validate_wall(item: dict[str, Any], index: int) -> None:
 
 
 def _validate_room(
-    item: dict[str, Any], index: int, wall_ids: set[str]
+    item: dict[str, Any], index: int, wall_by_id: dict[str, dict[str, Any]]
 ) -> tuple[float, float, float, float]:
     path = f"rooms[{index}]"
     _id(item.get("name"), f"{path}.name")
@@ -128,25 +128,52 @@ def _validate_room(
         raise ModelValidationError(f"{path}.boundary_wall_ids must contain at least 4 walls")
     for boundary_index, wall_id in enumerate(boundaries):
         wall_id = _id(wall_id, f"{path}.boundary_wall_ids[{boundary_index}]")
-        if wall_id not in wall_ids:
+        if wall_id not in wall_by_id:
             raise ModelValidationError(f"{path} references unknown wall {wall_id!r}")
+    x, y, width, height = rect
+    required_sides = {
+        "N": lambda wall: wall["axis"] == "h" and abs(wall["y"] - y) <= _EPS,
+        "S": lambda wall: wall["axis"] == "h" and abs(wall["y"] - (y + height)) <= _EPS,
+        "W": lambda wall: wall["axis"] == "v" and abs(wall["x"] - x) <= _EPS,
+        "E": lambda wall: wall["axis"] == "v" and abs(wall["x"] - (x + width)) <= _EPS,
+    }
+    for side, matches in required_sides.items():
+        covered = False
+        for wall_id in boundaries:
+            wall = wall_by_id[str(wall_id)]
+            if not matches(wall):
+                continue
+            if wall["axis"] == "h":
+                overlap = min(wall["x"] + wall["length"], x + width) - max(wall["x"], x)
+            else:
+                overlap = min(wall["y"] + wall["length"], y + height) - max(wall["y"], y)
+            if overlap >= (width if side in ("N", "S") else height) - _EPS:
+                covered = True
+                break
+        if not covered:
+            raise ModelValidationError(f"{path} boundary walls do not cover side {side}")
     group = item.get("merge_group_id")
     if group is not None:
         _id(group, f"{path}.merge_group_id")
     return rect
 
 
-def _validate_opening(item: dict[str, Any], index: int, wall_ids: set[str]) -> None:
+def _validate_opening(item: dict[str, Any], index: int, wall_by_id: dict[str, dict[str, Any]]) -> None:
     path = f"openings[{index}]"
     host = _id(item.get("host_wall_id"), f"{path}.host_wall_id")
-    if host not in wall_ids:
+    if host not in wall_by_id:
         raise ModelValidationError(f"{path} references unknown wall {host!r}")
-    _positive(item.get("width"), f"{path}.width")
-    _positive(item.get("height"), f"{path}.height")
+    width = _positive(item.get("width"), f"{path}.width")
+    height = _positive(item.get("height"), f"{path}.height")
     bottom = _finite_number(item.get("bottom_z"), f"{path}.bottom_z")
     if bottom < 0:
         raise ModelValidationError(f"{path}.bottom_z must be >= 0")
-    _finite_number(item.get("offset"), f"{path}.offset")
+    offset = _finite_number(item.get("offset"), f"{path}.offset")
+    wall = wall_by_id[host]
+    if offset < 0 or offset + width > wall["length"] + _EPS:
+        raise ModelValidationError(f"{path} span must be inside host wall {host!r}")
+    if bottom + height > wall["top_z"] + _EPS:
+        raise ModelValidationError(f"{path} must fit within host wall height")
     _id(item.get("kind"), f"{path}.kind")
 
 
@@ -182,6 +209,17 @@ def _validate_furniture(
     x, y = float(transform["x"]), float(transform["y"])
     if x < room_x - _EPS or y < room_y - _EPS or x + width > room_x + room_w + _EPS or y + depth > room_y + room_h + _EPS:
         raise ModelValidationError(f"{path} footprint must be inside room {room_id!r}")
+    if float(transform["z"]) < -_EPS:
+        raise ModelValidationError(f"{path}.transform.z must be >= 0")
+
+
+def _furniture_box(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    transform, dimensions = item["transform"], item["dimensions"]
+    width, depth = float(dimensions["width"]), float(dimensions["depth"])
+    if int(round(float(transform["rotation_z"]) / 90.0)) % 2:
+        width, depth = depth, width
+    x, y = float(transform["x"]), float(transform["y"])
+    return x, y, x + width, y + depth
 
 
 def _validate_camera(item: dict[str, Any], index: int) -> None:
@@ -247,20 +285,42 @@ def validate_model(document: dict[str, Any]) -> dict[str, Any]:
         collections[collection] = items
     _collection_ids(collections)
 
-    wall_ids = {item["id"] for item in collections["walls"]}
+    wall_by_id = {item["id"]: item for item in collections["walls"]}
+    wall_ids = set(wall_by_id)
     for index, item in enumerate(collections["walls"]):
         _validate_wall(item, index)
     room_rects: dict[str, tuple[float, float, float, float]] = {}
     for index, item in enumerate(collections["rooms"]):
-        room_rects[item["id"]] = _validate_room(item, index, wall_ids)
+        room_rects[item["id"]] = _validate_room(item, index, wall_by_id)
+    merge_groups: dict[str, list[str]] = {}
+    for item in collections["rooms"]:
+        group = item.get("merge_group_id")
+        if group is not None:
+            merge_groups.setdefault(group, []).append(item["id"])
+    for group, members in merge_groups.items():
+        if len(members) < 2:
+            raise ModelValidationError(f"merge_group_id {group!r} must contain at least two rooms")
     room_ids = set(room_rects)
     for index, item in enumerate(collections["openings"]):
-        _validate_opening(item, index, wall_ids)
+        _validate_opening(item, index, wall_by_id)
     for index, item in enumerate(collections["furniture_instances"]):
         _validate_furniture(item, index, room_ids, room_rects)
+    furniture_by_room: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {}
+    for index, item in enumerate(collections["furniture_instances"]):
+        furniture_by_room.setdefault(item["room_id"], []).append((index, _furniture_box(item)))
+    for room_id, items in furniture_by_room.items():
+        for left_index, (index, left) in enumerate(items):
+            for right_index, (other_index, right) in enumerate(items):
+                if right_index <= left_index:
+                    continue
+                overlap_x = min(left[2], right[2]) - max(left[0], right[0])
+                overlap_y = min(left[3], right[3]) - max(left[1], right[1])
+                if overlap_x > _EPS and overlap_y > _EPS:
+                    raise ModelValidationError(
+                        f"furniture_instances[{index}] collides with furniture_instances[{other_index}] in room {room_id!r}"
+                    )
     for index, item in enumerate(collections["cameras"]):
         _validate_camera(item, index)
     for index, item in enumerate(collections["materials"]):
         _validate_material(item, index)
     return document
-
