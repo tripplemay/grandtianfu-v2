@@ -43,6 +43,7 @@ def _read_png(data: bytes) -> tuple[int, int, list[int]]:
     offset = 8
     width = height = bit_depth = color_type = None
     compressed = bytearray()
+    saw_iend = False
     while offset + 12 <= len(data):
         length = _u32(data, offset)
         end = offset + 12 + length
@@ -70,9 +71,14 @@ def _read_png(data: bytes) -> tuple[int, int, list[int]]:
         elif kind == b"IDAT":
             compressed.extend(payload)
         elif kind == b"IEND":
+            if length != 0:
+                raise BitmapError("invalid PNG IEND")
+            saw_iend = True
             break
     if width is None or height is None:
         raise BitmapError("PNG is missing IHDR")
+    if not saw_iend:
+        raise BitmapError("PNG is missing IEND")
     try:
         raw = zlib.decompress(bytes(compressed))
     except zlib.error as exc:

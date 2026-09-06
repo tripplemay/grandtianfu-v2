@@ -65,6 +65,13 @@ def test_invalid_uploads_fail_closed(payload):
         ingest_bitmap(payload)
 
 
+def test_truncated_png_without_iend_fails_closed():
+    pixels = [[(255, 255, 255)]]
+    payload = png(1, 1, pixels)[:-12]
+    with pytest.raises(BitmapError, match="IEND"):
+        ingest_bitmap(payload)
+
+
 def test_invalid_calibration_fails_and_default_never_becomes_measured():
     with pytest.raises(BitmapError, match="mm_per_pixel"):
         ingest_bitmap(minimal_jpeg(), mm_per_pixel=0)

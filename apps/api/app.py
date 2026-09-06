@@ -144,21 +144,12 @@ def create_app(
             raise BitmapError("Content-Type does not match bitmap signature")
         filename = request.headers.get("x-filename", "upload.png" if content_type == "image/png" else "upload.jpg")
         root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
-        draft = await run_in_threadpool(ingest_bitmap_worker, data, filename, os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
+        ingest_root = os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests"))
+        draft = await run_in_threadpool(ingest_bitmap_worker, data, filename, ingest_root)
         ingest_id = draft["source"]["sha256"]
         directory = root / ingest_id
-        directory.mkdir(parents=True, exist_ok=True)
-        extension = ".png" if content_type == "image/png" else ".jpg"
-        (directory / f"source{extension}").write_bytes(data)
-        (directory / "draft.json").write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n")
-        manifest = {
-            "schema_version": "ingest-0.1",
-            "ingest_id": ingest_id,
-            "source": {"sha256": ingest_id, "media_type": content_type, "filename": filename},
-            "draft_model": "draft.json",
-            "requires_human_review": True,
-        }
-        (directory / "ingest-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        manifest = json.loads((directory / "ingest-manifest.json").read_text())
+        manifest.update({"ingest_id": ingest_id, "source": {"sha256": ingest_id, "media_type": content_type, "filename": filename}})
         return {**manifest, "model": draft}
 
     @app.get("/api/ingests/{ingest_id}")
@@ -167,7 +158,7 @@ def create_app(
             raise MissingRevision("Ingest not found")
         root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
         manifest_path = root / ingest_id / "ingest-manifest.json"
-        draft_path = root / ingest_id / "draft.json"
+        draft_path = root / ingest_id / "draft-model.json"
         if not manifest_path.is_file() or not draft_path.is_file():
             raise MissingRevision("Ingest not found")
         return {"manifest": json.loads(manifest_path.read_text()), "model": json.loads(draft_path.read_text())}
