@@ -1,0 +1,40 @@
+{
+  "schema_version": "2.0",
+  "profile": "orthogonal_v1",
+  "model_id": "fixture-living-merge-001",
+  "revision": 1,
+  "status": "confirmed",
+  "units": {"length": "mm", "angle": "deg"},
+  "source": {
+    "asset_id": "fixture-hand-authored-001",
+    "kind": "fixture",
+    "sha256": "not-a-production-asset"
+  },
+  "confidence": 1.0,
+  "rooms": [
+    {"id": "living", "name": "Living", "kind": "living", "merge_group_id": "open-living"},
+    {"id": "foyer", "name": "Foyer", "kind": "foyer", "merge_group_id": "open-living"}
+  ],
+  "walls": [
+    {"id": "wall-n", "axis": "h", "x": 0, "y": 0, "length": 6000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-s", "axis": "h", "x": 0, "y": 5000, "length": 6000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-w", "axis": "v", "x": 0, "y": 0, "length": 5000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-e", "axis": "v", "x": 6000, "y": 0, "length": 5000, "thickness": 120, "bottom_z": 0, "top_z": 2700}
+  ],
+  "openings": [],
+  "furniture_instances": [
+    {
+      "id": "sofa-1",
+      "catalog_id": "sofa",
+      "transform": {"x": 1500, "y": 3300, "z": 0, "rotation_z": 0},
+      "dimensions": {"width": 2200, "depth": 900, "height": 850},
+      "room_id": "living",
+      "attachment": "free",
+      "asset_ref": {"kind": "parametric", "ref": "sofa"},
+      "provenance": "fixture",
+      "confidence": 1.0
+    }
+  ],
+  "cameras": [],
+  "materials": []
+}

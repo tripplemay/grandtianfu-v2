@@ -29,7 +29,9 @@ LLM 不拥有精确家具位置的最终决定权。几何由场景模型和渲�
 
 ## 当前状态
 
-当前只完成架构基线和最小空间模型校验。下一阶段先做一个手工构建的客厅/书房 3D 垂直切片，再决定具体渲染栈和导入算法。
+阶段 0 的文档基线已完成：首期范围、空间模型契约、验收标准和阶段门已冻结。`spatial_core` 当前仍是最小校验基线，下一阶段实现完整事实源和版本校验；3D、位图解析和 AI 增强必须等待对应阶段门通过。
+
+完整路线见 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 本地验证
 
@@ -39,4 +41,3 @@ source .venv/bin/activate
 python -m pip install -e 'packages/spatial_core[dev]'
 pytest
 ```
-

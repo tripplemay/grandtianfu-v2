@@ -14,7 +14,7 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/spatial_core/tests"]
+pythonpath = ["packages/spatial_core"]
 
 [tool.setuptools.packages.find]
 where = ["packages/spatial_core"]
-
