@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -36,7 +37,14 @@ def render_revision(model: dict[str, Any], root: str | Path, *, width: int, heig
     if manifest_path.is_file():
         try:
             manifest = json.loads(manifest_path.read_text())
-            if manifest.get("model_hash") == model_hash and manifest.get("camera", {}).get("width") == width and manifest.get("camera", {}).get("height") == height:
+            hashes = manifest.get("artifact_hashes", {})
+            intact = all(
+                isinstance(filename, str)
+                and (output / filename).is_file()
+                and hashlib.sha256((output / filename).read_bytes()).hexdigest() == hashes.get(name)
+                for name, filename in manifest.get("files", {}).items()
+            )
+            if manifest.get("model_hash") == model_hash and manifest.get("camera", {}).get("width") == width and manifest.get("camera", {}).get("height") == height and intact:
                 return manifest
         except (OSError, ValueError):
             pass

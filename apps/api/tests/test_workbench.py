@@ -231,6 +231,11 @@ def test_render_confirmed_revision_publishes_raw_artifacts(client, model, tmp_pa
     assert manifest["artifact_url"].startswith("/render-artifacts/")
     for filename in manifest["files"].values():
         assert (tmp_path / "renders" / model["model_id"] / f"r1-{manifest['model_hash'][:16]}" / filename).is_file()
+    color_path = tmp_path / "renders" / model["model_id"] / f"r1-{manifest['model_hash'][:16]}" / manifest["files"]["color"]
+    color_path.write_bytes(b"tampered")
+    repaired = client.post(endpoint(model) + "/renders", json={"revision": 1, "width": 320, "height": 240}).json()
+    assert color_path.read_bytes() != b"tampered"
+    assert repaired["artifact_hashes"]["color"] == manifest["artifact_hashes"]["color"]
 
 
 def test_render_rejects_draft_and_invalid_dimensions(client, model):

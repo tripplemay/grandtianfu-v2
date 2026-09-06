@@ -227,6 +227,8 @@ def _scene_triangles(model: dict[str, Any]) -> tuple[list[_Triangle], dict[str, 
         roles[opening["id"]] = "opening"
         mask_values[opening["id"]] = 0
     for item in model["furniture_instances"]:
+        if item.get("asset_ref", {}).get("kind") != "parametric":
+            raise RenderError(f"unsupported furniture asset kind for {item['id']!r}")
         transform, dimensions = item["transform"], item["dimensions"]
         x, y, z = (float(transform[key]) for key in ("x", "y", "z"))
         width, depth, furniture_height = (float(dimensions[key]) for key in ("width", "depth", "height"))
@@ -254,8 +256,8 @@ def _rasterize(
     triangles = list(triangles)
     if not triangles:
         raise RenderError("scene contains no renderable geometry")
-    tan_horizontal = math.tan(math.radians(FOV_DEG) / 2.0)
-    tan_vertical = tan_horizontal * height / width
+    tan_vertical = math.tan(math.radians(FOV_DEG) / 2.0)
+    tan_horizontal = tan_vertical * width / height
 
     def project(vertex: tuple[float, float, float]) -> tuple[float, float, float]:
         relative = _sub(vertex, camera.position)

@@ -128,3 +128,10 @@ def test_failed_render_does_not_publish_partial_output(tmp_path):
         render_model(invalid, output)
     assert json.loads((output / "manifest.json").read_text()) == original
     assert not list(tmp_path.glob(f".{output.name}.*"))
+
+
+def test_unknown_asset_kind_is_a_hard_failure(tmp_path):
+    document = model()
+    document["furniture_instances"][0]["asset_ref"]["kind"] = "remote"
+    with pytest.raises(RenderError, match="unsupported furniture asset"):
+        render_model(document, tmp_path)
