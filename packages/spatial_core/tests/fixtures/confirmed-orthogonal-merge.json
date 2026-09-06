@@ -26,7 +26,10 @@
     {"id": "wall-f-s", "axis": "h", "x": 6000, "y": 2500, "length": 3000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
     {"id": "wall-f-e", "axis": "v", "x": 9000, "y": 0, "length": 2500, "thickness": 120, "bottom_z": 0, "top_z": 2700}
   ],
-  "openings": [],
+  "openings": [
+    {"id": "passage-1", "host_wall_id": "wall-e", "kind": "passage", "offset": 250, "width": 1800, "height": 2700, "bottom_z": 0},
+    {"id": "window-1", "host_wall_id": "wall-s", "kind": "window", "offset": 3400, "width": 1800, "height": 1400, "bottom_z": 900}
+  ],
   "furniture_instances": [
     {
       "id": "sofa-1",
@@ -36,6 +39,17 @@
       "room_id": "living",
       "attachment": "free",
       "asset_ref": {"kind": "parametric", "ref": "sofa"},
+      "provenance": "fixture",
+      "confidence": 1.0
+    },
+    {
+      "id": "table-1",
+      "catalog_id": "coffee_table",
+      "transform": {"x": 2000, "y": 1900, "z": 0, "rotation_z": 0},
+      "dimensions": {"width": 1200, "depth": 700, "height": 450},
+      "room_id": "living",
+      "attachment": "free",
+      "asset_ref": {"kind": "parametric", "ref": "coffee_table"},
       "provenance": "fixture",
       "confidence": 1.0
     }
