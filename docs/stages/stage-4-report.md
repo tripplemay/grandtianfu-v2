@@ -1,6 +1,6 @@
 # 阶段 4：位图导入首个垂直切片
 
-状态：**首个 bounded slice 实现完成，等待独立验收与用户确认**
+状态：**首个 bounded slice 独立验收通过，等待用户确认**
 
 ## 已交付
 
@@ -13,10 +13,11 @@
 
 ## 验证
 
-- `uv run pytest -q`：88 passed。
+- `uv run pytest -q`：89 passed。
 - `uv run ruff check apps/api apps/api/tests packages/ingest packages/ingest/tests`：通过。
 - 前置 Stage 3 的前端测试与构建保持通过。
 - API 上传 smoke：返回 draft、源 hash 和 `requires_human_review=true`；重复上传复用同一 ingest id。
+- 独立验收报告：`docs/test-reports/stage-4-acceptance-report.md`，bounded slice 结论 PASS。
 
 ## 当前边界
 
