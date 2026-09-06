@@ -60,3 +60,9 @@ POST /api/models/fixture-living-merge-001/renders {revision:1,width:64,height:48
 - 垂直 FOV：实现已改为垂直 50°并按 `width / height` 推导水平角，符合冻结公式；非方形 fixture 测试通过。
 
 本轮结论：**三个原 P1 阻断均复验通过**。原报告列出的 ceiling 按全局 `max_top`、opening mask 不进入 `instance_table`、near/far 越界整三角形丢弃、floor 使用 `[0,1]` 厚度等契约偏差本轮未见修复；若这些仍属于阶段门要求，整体 Stage 3 仍应保持 `FAIL/conditional`，不能仅因 P1 修复改判无条件 PASS。
+
+## 最终独立复验（`329b93d`）
+
+复验日期：2026-09-07。代码已关闭此前四项几何风险：floor 使用 `z=0` 平面，ceiling 按 room/merge boundary `top_z`，opening 使用非零实例 ID 并进入 manifest 映射，near/far 使用多边形裁剪。对应 scene3d 回归测试通过。
+
+验证结果：`uv run pytest -q` 为 `74 passed`；`uv run ruff check apps/api packages/scene3d` 通过；confirmed fixture worker smoke exit 0 并写出 manifest 与四个 raw/RGBA channels。结合前轮 API 缓存完整性、垂直 FOV、asset kind hard-fail 验证，最终独立结论：**PASS**。本轮未运行长时间 Playwright。

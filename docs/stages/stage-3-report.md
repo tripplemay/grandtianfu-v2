@@ -1,6 +1,6 @@
 # 阶段 3：CPU 3D 场景垂直切片报告
 
-状态：**实现完成，等待独立复核和用户确认**
+状态：**独立验收通过，等待用户确认**
 
 ## 已交付
 
@@ -13,11 +13,12 @@
 
 ## 阶段门证据
 
-- `uv run pytest -q`：71 passed。
+- `uv run pytest -q`：74 passed。
 - `uv run ruff check apps/api apps/api/tests packages/scene3d packages/scene3d/tests`：通过。
 - fixture `confirmed-orthogonal-merge` 800×600 smoke：两个家具均有非空、正宽高的唯一 mask；四类通道 hash 已写入 manifest。
 - 同一 fixture、同一尺寸重复渲染：四类通道 hash 和 manifest 完全一致。
 - draft、缺失相机、空墙体/房间、越界数值和 worker 输入错误均硬失败；原有完整产物不会被失败任务替换。
+- 独立验收报告：`docs/test-reports/stage-3-acceptance-report.md`，最终结论 PASS。
 
 ## 明确边界
 
