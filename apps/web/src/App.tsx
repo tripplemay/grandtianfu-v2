@@ -866,7 +866,7 @@ export default function App() {
               selection={selection}
               onSelect={choose}
               onEdit={edit}
-              readOnly={readOnly}
+              readOnly={readOnly || invalidFields.size > 0 || !!dialog}
             />
           </section>
 

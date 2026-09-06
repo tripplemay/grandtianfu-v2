@@ -37,3 +37,10 @@
 - `source .venv/bin/activate && pytest -q tests/e2e/test_workbench.py`：8 passed（含初始 CTM 多步平移、无效字段、Escape 恢复、添加/删除家具和移动端流程）。
 
 复验确认首轮 P1 平移漂移和 aria-label 阻断已修复；新增 Escape 场景通过。当前未发现可复现的阶段门阻断问题。首轮问题与证据保留，不因修复删除或软化。
+
+## 最终复验（2026-09-06）
+
+- `uv run pytest tests/e2e -q`：9 passed（12.77s）。新增覆盖数字输入点回画布后 Escape 不回滚先前值、无效输入点家具后取消不改模型。
+- Linux CI run `34026163887`（commit `befd4e1`）：成功。
+
+最终结果验证了当前组合补丁在本地与 Linux Chromium 下通过；由于同一补丁同时包含默认交互隔离、焦点转移、状态守卫和诊断增强，不将 CI 修复归因于单一根因。

@@ -157,12 +157,12 @@ def test_drag_after_zoom_pan_undo_and_save(workbench):
     )
     page.evaluate("""() => {
       window.dragEvents = [];
-      for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'dragstart', 'lostpointercapture']) {
+      for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'dragstart', 'gotpointercapture', 'lostpointercapture']) {
         document.addEventListener(kind, event => window.dragEvents.push({
           kind, x: event.clientX, y: event.clientY, buttons: event.buttons,
           target: event.target.closest('[data-testid]')?.getAttribute('data-testid') || event.target.tagName,
           prevented: event.defaultPrevented,
-        }));
+        }), {capture:true});
       }
     }""")
     sofa = page.get_by_test_id("furniture-sofa-1")
@@ -192,6 +192,19 @@ def test_drag_after_zoom_pan_undo_and_save(workbench):
     transform = head(page)["model"]["furniture_instances"][0]["transform"]
     assert transform["x"] == expected_x
     assert transform["y"] == expected_y
+
+
+def test_canvas_focus_commits_numeric_edit_before_escape(workbench):
+    page = workbench
+    select_sofa(page)
+    field = page.get_by_role("spinbutton", name="X", exact=True)
+    field.fill("1600")
+    page.get_by_test_id("furniture-sofa-1").click()
+    expect(page.locator("svg.plan-surface")).to_be_focused()
+    page.keyboard.press("Escape")
+    expect(field).to_have_value("1600")
+    save(page)
+    assert head(page)["model"]["furniture_instances"][0]["transform"]["x"] == 1600
 
 
 def test_invalid_geometry_dirty_guard_and_conflict(workbench):
@@ -260,6 +273,11 @@ def test_add_delete_and_cancel_numeric_input(workbench):
     expect(page.get_by_role("button", name="保存", exact=True)).to_be_disabled()
     field.fill("")
     expect(page.get_by_text("数值输入未完成", exact=True)).to_be_visible()
+    page.get_by_test_id("furniture-table-1").click()
+    expect(page.get_by_role("dialog")).to_contain_text("放弃未完成的数值输入")
+    page.get_by_role("dialog").get_by_role("button", name="取消", exact=True).click()
+    expect(field).to_have_value("")
+    assert head(page) == original
     page.get_by_role("button", name="重新载入最新版本", exact=True).click()
     page.get_by_role("dialog").get_by_role("button", name="取消", exact=True).click()
     expect(field).to_have_value("")

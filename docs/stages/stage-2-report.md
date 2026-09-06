@@ -21,12 +21,14 @@
 | `uv run pytest -q` | 54 passed；2 条上游 TestClient/AnyIO 弃用警告 |
 | `npm --prefix apps/web test` | 17 passed |
 | `npm --prefix apps/web run build` | TypeScript 与 Vite 构建通过 |
-| `uv run pytest tests/e2e -q` | 8 passed |
+| `uv run pytest tests/e2e -q` | 9 passed |
 | `uv run ruff check apps/api tests/e2e` | 通过 |
 | `npm --prefix apps/web ci` | 通过；审计未报告依赖漏洞 |
 | `git diff --check` | 通过 |
 
 浏览器覆盖：小数坐标与尺寸保存/刷新、历史恢复不覆盖、缩放后拖动、连续平移、撤销/重做、无效输入拒绝、未保存导航取消、并发冲突、共享墙锁定、房间宽度/开口编辑与确认、家具添加/删除、数值 Escape 取消，以及 1440x960 / 390x844 / 360x640 布局。
+
+补充覆盖数值框到画布的焦点切换和无效输入弹窗期间的拖动阻断。Linux 首轮 CI 曾在拖动用例保留原坐标；加入浏览器默认交互阻断及工具切换状态等待后，CI `34026163887` 全部通过。该组合修复验证了行为，不将原失败单独归因于尚未隔离验证的浏览器事件根因。后续 CI 截图作为 Actions artifact 保存 7 天。
 
 每个浏览器用例使用独立临时 SQLite 与 loopback 端口，不修改工作台数据库。截图位于忽略目录 `artifacts/e2e/stage-2-*.png`。内嵌浏览器运行时未提供可用实例，本次使用独立 Playwright Chromium 完成验收。
 

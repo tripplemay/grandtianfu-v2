@@ -348,8 +348,9 @@ export function PlanCanvas({
   }, []);
 
   const onPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (!svgRef.current) return;
-    if (tool !== "pan" || event.button !== 0) return;
+    if (!svgRef.current || event.button !== 0) return;
+    svgRef.current.focus({ preventScroll: true });
+    if (tool !== "pan") return;
     event.preventDefault();
     svgRef.current.setPointerCapture(event.pointerId);
     const inverseCtm = svgRef.current.getScreenCTM()?.inverse() ?? null;
@@ -439,6 +440,7 @@ export function PlanCanvas({
   ) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    svgRef.current?.focus({ preventScroll: true });
     onSelect({ kind: "furniture", id: item.id });
     if (tool === "pan") return;
     event.stopPropagation();
@@ -670,6 +672,7 @@ export function PlanCanvas({
       </div>
       <svg
         ref={svgRef}
+        tabIndex={0}
         className="plan-surface"
         viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
         role="img"
