@@ -34,7 +34,7 @@ PYTHONPATH=packages/spatial_core:packages/scene3d \
 - `instance-mask.u32le`：每像素一个 little-endian uint32，0 是背景，实例到 mask 值的映射写入 manifest。
 - `manifest.json`：模型 revision/hash、相机 basis、FOV/near/far、对象 ID/角色/像素框、通道 dtype/shape 和文件 hash。
 
-场景包含房间地面、墙体、真实墙洞、实体顶面和参数家具盒体；家具网格和照片级材质不在本阶段范围内。
+场景包含按 merge group 确定性 union 的 `z=0` 房间地面、墙体、真实墙洞、按边界墙最大标高生成的实体顶面和参数家具盒体；near/far 面采用相机空间多边形裁剪。opening 净空不覆盖像素，但保留 `opening:{id}` 的非零实例映射。家具网格和照片级材质不在本阶段范围内。
 
 所有数值进入光栅器前都必须为有限数且绝对值不超过 `1_000_000_000`；单张输出最大 `4096x4096`。渲染先写入同级临时目录，所有 pass 和 manifest 成功后再原子发布，失败不会替换已有完整输出。
 

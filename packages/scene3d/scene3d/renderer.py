@@ -169,6 +169,42 @@ def _box(
     return triangles
 
 
+def _plane(
+    object_id: str,
+    role: str,
+    bounds: tuple[float, float, float, float, float],
+    color: tuple[int, int, int],
+    mask_value: int,
+) -> list[_Triangle]:
+    """Emit a zero-thickness horizontal plane at the supplied Z."""
+    x0, y0, x1, y1, z = bounds
+    normal = (0.0, 0.0, 1.0)
+    a, b, c, d = (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)
+    return [
+        _Triangle((a, b, c), normal, color, object_id, mask_value, role),
+        _Triangle((a, c, d), normal, color, object_id, mask_value, role),
+    ]
+
+
+def _union_rects(rects: list[tuple[str, float, float, float, float]]) -> list[tuple[str, float, float, float, float]]:
+    """Return deterministic non-overlapping cells for axis-aligned rectangles."""
+    if not rects:
+        return []
+    xs = sorted({value for _, x, y, width, height in rects for value in (x, x + width)})
+    ys = sorted({value for _, x, y, width, height in rects for value in (y, y + height)})
+    cells = []
+    for x0, x1 in itertools.pairwise(xs):
+        for y0, y1 in itertools.pairwise(ys):
+            if x1 - x0 <= _EPS or y1 - y0 <= _EPS:
+                continue
+            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            owner = next((item_id for item_id, x, y, width, height in rects
+                          if x <= cx <= x + width and y <= cy <= y + height), None)
+            if owner is not None:
+                cells.append((owner, x0, y0, x1, y1))
+    return cells
+
+
 def _scene_triangles(model: dict[str, Any]) -> tuple[list[_Triangle], dict[str, int], dict[str, str]]:
     triangles: list[_Triangle] = []
     mask_values: dict[str, int] = {}
@@ -185,11 +221,43 @@ def _scene_triangles(model: dict[str, Any]) -> tuple[list[_Triangle], dict[str, 
         roles[object_id] = role
         triangles.extend(_box(object_id, role, bounds, _color(object_id, color_role), mask_values[object_id]))
 
-    max_top = max(float(wall["top_z"]) for wall in model["walls"])
+    walls_by_id = {wall["id"]: wall for wall in model["walls"]}
+    groups: dict[str, list[dict[str, Any]]] = {}
     for room in model["rooms"]:
-        x, y, width, height = (float(value) for value in room["rect"])
-        add(f"floor:{room['id']}", "floor", (x, y, x + width, y + height, 0.0, 1.0), "floor")
-        add(f"ceiling:{room['id']}", "ceiling", (x, y, x + width, y + height, max_top - 40.0, max_top), "ceiling")
+        groups.setdefault(str(room.get("merge_group_id") or room["id"]), []).append(room)
+    for group_rooms in groups.values():
+        # Keep every source room addressable even when its rectangle is fully
+        # covered by another member of the deterministic union.
+        for room in group_rooms:
+            object_id = f"room:{room['id']}"
+            if object_id not in mask_values:
+                if next_mask > 65534:
+                    raise RenderError("scene has more than 65534 maskable objects")
+                mask_values[object_id] = next_mask
+                next_mask += 1
+            roles[object_id] = "room"
+        room_rects = [(room["id"], *(float(value) for value in room["rect"])) for room in group_rooms]
+        floor_cells = _union_rects(room_rects)
+        for room_id, x0, y0, x1, y1 in floor_cells:
+            object_id = f"room:{room_id}"
+            add_triangles = _plane(object_id, "floor", (x0, y0, x1, y1, 0.0), _color(object_id, "floor"), mask_values[object_id])
+            triangles.extend(add_triangles)
+    for group_id, rooms in sorted(groups.items()):
+        boundary_ids = {wall_id for room in rooms for wall_id in room.get("boundary_wall_ids", [])}
+        tops = [float(walls_by_id[wall_id]["top_z"]) for wall_id in boundary_ids if wall_id in walls_by_id]
+        if not tops:
+            raise RenderError(f"room/merge group {group_id!r} has no boundary wall top_z")
+        top = max(tops)
+        ceiling_rects = [(room["id"], *(float(value) for value in room["rect"])) for room in rooms]
+        for room_id, x0, y0, x1, y1 in _union_rects(ceiling_rects):
+            object_id = f"ceiling:{group_id}"
+            if object_id not in mask_values:
+                if next_mask > 65534:
+                    raise RenderError("scene has more than 65534 maskable objects")
+                mask_values[object_id] = next_mask
+                next_mask += 1
+            roles[object_id] = "ceiling"
+            triangles.extend(_plane(object_id, "ceiling", (x0, y0, x1, y1, top), _color(object_id, "ceiling"), mask_values[object_id]))
     openings_by_wall: dict[str, list[dict[str, Any]]] = {}
     for opening in model["openings"]:
         openings_by_wall.setdefault(opening["host_wall_id"], []).append(opening)
@@ -220,12 +288,19 @@ def _scene_triangles(model: dict[str, Any]) -> tuple[list[_Triangle], dict[str, 
                     bounds = (x + start, y - half, x + end, y + half, z_start, z_end)
                 else:
                     bounds = (x - half, y + start, x + half, y + end, z_start, z_end)
-                add(wall["id"], "wall", bounds, "wall")
+                add(f"wall:{wall['id']}", "wall", bounds, "wall")
     # Openings are represented by the absence of wall triangles. They retain
-    # mask value zero because a void has no covered pixels.
+    # a non-zero manifest instance ID even though the void has no pixels.
     for opening in model["openings"]:
-        roles[opening["id"]] = "opening"
-        mask_values[opening["id"]] = 0
+        # A void has no covered pixels, but retains a non-zero ID in the
+        # instance table so downstream geometry consumers can resolve it.
+        object_id = f"opening:{opening['id']}"
+        if object_id not in mask_values:
+            if next_mask > 65534:
+                raise RenderError("scene has more than 65534 maskable objects")
+            mask_values[object_id] = next_mask
+            next_mask += 1
+        roles[object_id] = "opening"
     for item in model["furniture_instances"]:
         if item.get("asset_ref", {}).get("kind") != "parametric":
             raise RenderError(f"unsupported furniture asset kind for {item['id']!r}")
@@ -234,7 +309,7 @@ def _scene_triangles(model: dict[str, Any]) -> tuple[list[_Triangle], dict[str, 
         width, depth, furniture_height = (float(dimensions[key]) for key in ("width", "depth", "height"))
         if round(float(transform["rotation_z"]) / 90.0) % 2:
             width, depth = depth, width
-        add(item["id"], "furniture", (x, y, x + width, y + depth, z, z + furniture_height), "furniture")
+        add(f"furniture:{item['id']}", "furniture", (x, y, x + width, y + depth, z, z + furniture_height), "furniture")
     return triangles, mask_values, roles
 
 
@@ -263,17 +338,42 @@ def _rasterize(
         relative = _sub(vertex, camera.position)
         u, v = _dot(relative, camera.right), _dot(relative, camera.up)
         depth = _dot(_sub(vertex, camera.position), camera.forward)
-        if depth <= NEAR_MM or depth >= FAR_MM:
+        # Clipping intersections are generated exactly on the plane; allow
+        # those boundary vertices through after polygon clipping.
+        if depth < NEAR_MM - 1e-6 or depth > FAR_MM + 1e-6:
             raise RenderError("triangle intersects camera clipping range")
         cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
         return cx + (u / depth / tan_horizontal) * width / 2.0, cy - (v / depth / tan_vertical) * height / 2.0, depth
 
+    def clip_polygon(vertices: list[tuple[float, float, float]], limit: float, keep_greater: bool) -> list[tuple[float, float, float]]:
+        if not vertices:
+            return []
+        result: list[tuple[float, float, float]] = []
+        previous = vertices[-1]
+        previous_depth = _dot(_sub(previous, camera.position), camera.forward)
+        previous_inside = previous_depth >= limit if keep_greater else previous_depth <= limit
+        for current in vertices:
+            current_depth = _dot(_sub(current, camera.position), camera.forward)
+            current_inside = current_depth >= limit if keep_greater else current_depth <= limit
+            if current_inside != previous_inside:
+                denominator = current_depth - previous_depth
+                if abs(denominator) > _EPS:
+                    ratio = (limit - previous_depth) / denominator
+                    result.append(tuple(previous[index] + ratio * (current[index] - previous[index]) for index in range(3)))
+            if current_inside:
+                result.append(current)
+            previous, previous_depth, previous_inside = current, current_depth, current_inside
+        return result
+
     projected = []
     for triangle in triangles:
-        try:
-            projected.append((triangle, tuple(project(vertex) for vertex in triangle.vertices)))
-        except RenderError:
+        polygon = clip_polygon(list(triangle.vertices), NEAR_MM, True)
+        polygon = clip_polygon(polygon, FAR_MM, False)
+        if len(polygon) < 3:
             continue
+        for index in range(1, len(polygon) - 1):
+            clipped = _Triangle((polygon[0], polygon[index], polygon[index + 1]), triangle.normal, triangle.color, triangle.object_id, triangle.mask_value, triangle.role)
+            projected.append((clipped, tuple(project(vertex) for vertex in clipped.vertices)))
     if not projected:
         raise RenderError("all geometry is outside camera clipping range")
     min_depth, max_depth = NEAR_MM, FAR_MM
@@ -390,7 +490,7 @@ def render_model(model: dict[str, Any], output_dir: str | Path, *, width: int | 
                 "normal": {"file": files["normal"], "dtype": "float32", "endianness": "little", "shape": [camera.height, camera.width, 3], "encoding": "world XYZ"},
                 "instance_mask": {"file": files["instance_mask"], "dtype": "uint32", "endianness": "little", "shape": [camera.height, camera.width], "background": 0},
             },
-            "opening_geometry": {opening["id"]: {"role": "void", "mask_value": 0} for opening in model["openings"]},
+            "opening_geometry": {opening["id"]: {"role": "void", "instance_id": f"opening:{opening['id']}", "mask_value": masks[f"opening:{opening['id']}"]} for opening in model["openings"]},
             "geometry_checks": {"coordinate_adapter": "identity-xy-z-up-v1", "projection": "perspective", "invalid_geometry": "hard-fail"},
             "determinism": {"seed": 0, "threads": 1},
         }

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from scene3d import RenderError, render_model
+from scene3d.renderer import _Camera, _rasterize, _scene_triangles, _Triangle
 
 FIXTURE = Path(__file__).resolve().parents[2] / "spatial_core/tests/fixtures/confirmed-orthogonal-merge.json"
 
@@ -40,11 +41,12 @@ def test_render_writes_deterministic_passes_and_manifest(tmp_path):
     assert len(depth_raw) == 320 * 240 * 4 and any(depth_raw)
     assert len(normal_raw) == 320 * 240 * 12 and any(normal_raw)
     assert len(mask_raw) == 320 * 240 * 4 and any(mask_raw)
-    furniture_ids = {item["id"] for item in model()["furniture_instances"]}
+    furniture_ids = {f"furniture:{item['id']}" for item in model()["furniture_instances"]}
     assert furniture_ids <= set(first["mask_values"])
     assert all(first["objects"][item_id]["mask_value"] > 0 for item_id in furniture_ids)
     assert all(first["objects"][item_id]["width"] > 0 and first["objects"][item_id]["height"] > 0 for item_id in furniture_ids)
     assert set(first["opening_geometry"]) == {item["id"] for item in model()["openings"]}
+    assert all(item["mask_value"] > 0 and item["instance_id"].startswith("opening:") for item in first["opening_geometry"].values())
     assert json.loads((tmp_path / "first" / "manifest.json").read_text()) == first
 
 
@@ -135,3 +137,32 @@ def test_unknown_asset_kind_is_a_hard_failure(tmp_path):
     document["furniture_instances"][0]["asset_ref"]["kind"] = "remote"
     with pytest.raises(RenderError, match="unsupported furniture asset"):
         render_model(document, tmp_path)
+
+
+def test_floor_is_zero_height_and_ceiling_uses_merge_boundary_top():
+    document = model()
+    document["walls"][0]["top_z"] = 2500
+    document["walls"][1]["top_z"] = 3100
+    triangles, masks, _roles = _scene_triangles(document)
+    floor = [triangle for triangle in triangles if triangle.role == "floor"]
+    assert floor and all(vertex[2] == 0.0 for triangle in floor for vertex in triangle.vertices)
+    ceiling = [triangle for triangle in triangles if triangle.role == "ceiling"]
+    assert ceiling and {vertex[2] for triangle in ceiling for vertex in triangle.vertices} == {3100.0}
+    assert all(entry.startswith(("room:", "wall:", "opening:", "furniture:", "ceiling:")) for entry in masks)
+
+
+def test_triangle_crossing_near_plane_is_clipped_instead_of_dropped():
+    camera = _Camera(
+        position=(0.0, 0.0, 0.0),
+        forward=(1.0, 0.0, 0.0),
+        right=(0.0, 1.0, 0.0),
+        up=(0.0, 0.0, 1.0),
+        width=64,
+        height=64,
+        source_id="test",
+    )
+    triangle = _Triangle(((5.0, -200.0, -200.0), (1000.0, 200.0, -200.0), (1000.0, -200.0, 200.0)), (1.0, 0.0, 0.0), (100, 100, 100), "test", 1, "wall")
+    _, depth, _, mask, boxes, _ = _rasterize([triangle], camera, 64, 64)
+    assert any(depth)
+    assert any(mask)
+    assert boxes["test"]["width"] > 0
