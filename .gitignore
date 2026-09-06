@@ -16,4 +16,7 @@ build/
 data/
 artifacts/
 uploads/
-
+node_modules/
+apps/web/dist/
+test-results/
+playwright-report/
