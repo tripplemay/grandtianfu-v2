@@ -47,3 +47,16 @@ POST /api/models/fixture-living-merge-001/renders {revision:1,width:64,height:48
 ## 复核结论
 
 基础 happy path、worker 隔离、RGBA/raw channel 文件写出、manifest 字段和确定性测试均通过；但 P1 缓存完整性、投影内参和资产引用处理直接违反冻结契约/阶段门，故本阶段不能判定 PASS。修复后至少补充：缓存目录缺文件/篡改 hash 的 API 回归测试、非方形相机投影 golden test、非法/缺失 asset_ref 的硬失败测试，以及异高房间、opening instance table 和 near-plane clipping 的几何测试。
+
+## 第二轮复验（`06b85ca`）
+
+复验日期：2026-09-06。当前 HEAD 为 `06b85ca`，包含针对本报告三个 P1 的修复。
+
+- `uv run pytest -q`：`72 passed`，2 个既有依赖弃用警告。
+- 定向 scene3d/API 测试：`56 passed`。
+- scoped `ruff check`（本次变更涉及的 API、renderer 与测试文件）：通过。
+- 缓存完整性探针：首次渲染后将 `color.png` 改写为 `b"corrupt"`，重复同一请求返回 `200`，文件被重新生成并恢复为原 artifact hash。
+- 资产探针：将 fixture 家具 `asset_ref.kind` 改为 `external`、引用 `missing`，`render_model` 返回 `RenderError: unsupported furniture asset kind`。
+- 垂直 FOV：实现已改为垂直 50°并按 `width / height` 推导水平角，符合冻结公式；非方形 fixture 测试通过。
+
+本轮结论：**三个原 P1 阻断均复验通过**。原报告列出的 ceiling 按全局 `max_top`、opening mask 不进入 `instance_table`、near/far 越界整三角形丢弃、floor 使用 `[0,1]` 厚度等契约偏差本轮未见修复；若这些仍属于阶段门要求，整体 Stage 3 仍应保持 `FAIL/conditional`，不能仅因 P1 修复改判无条件 PASS。
