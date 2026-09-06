@@ -1,55 +1,82 @@
-from spatial_core import ModelValidationError, validate_model
+import copy
+import json
+from pathlib import Path
+
+import pytest
+
+from spatial_core import ModelValidationError, canonical_hash, validate_model
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "confirmed-orthogonal-merge.json"
 
 
 def base_model():
-    return {
-        "schema_version": "2.0",
-        "model_id": "model-1",
-        "revision": 1,
-        "units": {"length": "mm", "angle": "deg"},
-        "source": {"asset_id": "asset-1", "kind": "bitmap", "sha256": "abc"},
-        "confidence": 0.8,
-        "rooms": [{"id": "room-1"}],
-        "walls": [{"id": "wall-1"}],
-        "openings": [],
-        "furniture_instances": [
-            {
-                "id": "sofa-1",
-                "catalog_id": "sofa",
-                "transform": {"x": 1000, "y": 2000, "z": 0, "rotation_z": 90},
-                "dimensions": {"width": 2200, "depth": 900, "height": 850},
-                "room_id": "room-1",
-                "confidence": 1.0,
-            }
-        ],
-        "cameras": [],
-        "materials": [],
-    }
+    return json.loads(FIXTURE.read_text())
 
 
-def test_valid_model_is_returned_unchanged():
+def assert_invalid(model, text):
+    with pytest.raises(ModelValidationError, match=text):
+        validate_model(model)
+
+
+def test_confirmed_orthogonal_merge_fixture_is_valid():
     model = base_model()
     assert validate_model(model) is model
 
 
-def test_duplicate_object_ids_are_rejected():
+def test_canonical_hash_is_stable_and_changes_with_content():
     model = base_model()
-    model["rooms"].append({"id": "room-1"})
-    try:
-        validate_model(model)
-    except ModelValidationError as exc:
-        assert "duplicate id" in str(exc)
-    else:
-        raise AssertionError("duplicate ids must fail")
+    assert canonical_hash(model) == canonical_hash(copy.deepcopy(model))
+    model["revision"] = 2
+    assert canonical_hash(model) != canonical_hash(base_model())
 
 
-def test_non_positive_furniture_dimensions_are_rejected():
+def test_duplicate_ids_are_rejected_across_collections():
     model = base_model()
-    model["furniture_instances"][0]["dimensions"]["width"] = 0
-    try:
-        validate_model(model)
-    except ModelValidationError as exc:
-        assert "width" in str(exc)
-    else:
-        raise AssertionError("non-positive dimensions must fail")
+    model["rooms"][0]["id"] = model["walls"][0]["id"]
+    assert_invalid(model, "duplicate id")
+
+
+def test_non_orthogonal_wall_is_rejected():
+    model = base_model()
+    model["walls"][0]["axis"] = "diagonal"
+    assert_invalid(model, "axis")
+
+
+def test_unknown_room_reference_is_rejected():
+    model = base_model()
+    model["furniture_instances"][0]["room_id"] = "missing"
+    assert_invalid(model, "unknown room")
+
+
+def test_unknown_opening_host_is_rejected():
+    model = base_model()
+    model["openings"] = [{
+        "id": "window-1",
+        "host_wall_id": "missing",
+        "width": 1200,
+        "height": 1400,
+        "bottom_z": 900,
+        "offset": 500,
+        "kind": "window",
+    }]
+    assert_invalid(model, "unknown wall")
+
+
+def test_furniture_outside_room_is_rejected():
+    model = base_model()
+    model["furniture_instances"][0]["transform"]["x"] = 5900
+    assert_invalid(model, "inside room")
+
+
+def test_fractional_rotation_is_rejected_for_mvp():
+    model = base_model()
+    model["furniture_instances"][0]["transform"]["rotation_z"] = 15
+    assert_invalid(model, "multiple of 90")
+
+
+def test_incomplete_camera_is_rejected():
+    model = base_model()
+    model["cameras"] = [{"id": "camera-1", "projection": "perspective"}]
+    assert_invalid(model, "image_size")
 

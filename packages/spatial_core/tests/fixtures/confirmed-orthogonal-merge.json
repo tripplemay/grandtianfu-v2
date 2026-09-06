@@ -5,21 +5,26 @@
   "revision": 1,
   "status": "confirmed",
   "units": {"length": "mm", "angle": "deg"},
+  "coordinates": {"origin": "project_south_west_corner", "handedness": "right"},
   "source": {
     "asset_id": "fixture-hand-authored-001",
     "kind": "fixture",
-    "sha256": "not-a-production-asset"
+    "sha256": "not-a-production-asset",
+    "provenance": "fixture"
   },
   "confidence": 1.0,
   "rooms": [
-    {"id": "living", "name": "Living", "kind": "living", "merge_group_id": "open-living"},
-    {"id": "foyer", "name": "Foyer", "kind": "foyer", "merge_group_id": "open-living"}
+    {"id": "living", "name": "Living", "kind": "living", "rect": [0, 0, 6000, 5000], "boundary_wall_ids": ["wall-n", "wall-s", "wall-w", "wall-e"], "merge_group_id": "open-living"},
+    {"id": "foyer", "name": "Foyer", "kind": "foyer", "rect": [6000, 0, 3000, 2500], "boundary_wall_ids": ["wall-f-n", "wall-f-s", "wall-f-e", "wall-e"], "merge_group_id": "open-living"}
   ],
   "walls": [
     {"id": "wall-n", "axis": "h", "x": 0, "y": 0, "length": 6000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
     {"id": "wall-s", "axis": "h", "x": 0, "y": 5000, "length": 6000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
     {"id": "wall-w", "axis": "v", "x": 0, "y": 0, "length": 5000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
-    {"id": "wall-e", "axis": "v", "x": 6000, "y": 0, "length": 5000, "thickness": 120, "bottom_z": 0, "top_z": 2700}
+    {"id": "wall-e", "axis": "v", "x": 6000, "y": 0, "length": 5000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-f-n", "axis": "h", "x": 6000, "y": 0, "length": 3000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-f-s", "axis": "h", "x": 6000, "y": 2500, "length": 3000, "thickness": 120, "bottom_z": 0, "top_z": 2700},
+    {"id": "wall-f-e", "axis": "v", "x": 9000, "y": 0, "length": 2500, "thickness": 120, "bottom_z": 0, "top_z": 2700}
   ],
   "openings": [],
   "furniture_instances": [
