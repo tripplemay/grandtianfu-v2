@@ -22,5 +22,6 @@ target-version = "py312"
 line-length = 100
 
 [tool.setuptools.packages.find]
-where = ["packages"]
+where = ["packages/spatial_core", "packages/scene3d"]
 include = ["spatial_core*", "scene3d*"]
+exclude = ["tests*", "*.tests*"]
