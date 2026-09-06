@@ -35,8 +35,12 @@ GT_DB_PATH=/tmp/grandtianfu-workbench.sqlite3 \
 | `POST` | `/api/models/{model_id}/validate` | 只校验，不写数据库 |
 | `POST` | `/api/models/{model_id}/revisions` | CAS 保存或确认并追加新版本 |
 | `POST` | `/api/models/{model_id}/renders` | 在独立 CPU worker 中渲染指定 confirmed/locked revision |
+| `POST` | `/api/ingests` | 上传 PNG/JPEG 并生成 draft SpatialModel |
+| `GET` | `/api/ingests/{ingest_id}` | 获取导入 manifest 和 draft |
 
 渲染请求格式为 `{ "revision": 1, "width": 800, "height": 600 }`，宽高范围为 1..2048。响应包含固定 `cpu-perspective-v1` 相机、四类通道文件和 artifact URL；渲染目录可通过 `GT_RENDER_ROOT` 指定，默认是 `artifacts/renders`。
+
+导入请求使用原始图片 body，`Content-Type` 必须是 `image/png` 或 `image/jpeg`，可用 `X-Filename` 提供文件名。响应始终是 `status=draft`，并带有原始 SHA-256 与 `requires_human_review=true`；导入目录可通过 `GT_INGEST_ROOT` 指定，默认是 `artifacts/ingests`。
 
 保存请求格式：
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+import struct
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -43,6 +45,15 @@ def save_body(current, model=None, action="save"):
         "note": "Workbench test",
         "action": action,
     }
+
+
+def tiny_png() -> bytes:
+    pixels = bytes([255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255])
+    raw = b"\x00" + pixels[:6] + b"\x00" + pixels[6:]
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff)
+    header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
 def test_startup_is_explicit_and_seed_is_idempotent(tmp_path, model):
@@ -244,6 +255,27 @@ def test_render_rejects_draft_and_invalid_dimensions(client, model):
     draft = client.post(endpoint(model) + "/revisions", json=body).json()
     assert client.post(endpoint(model) + "/renders", json={"revision": draft["model"]["revision"], "width": 320, "height": 240}).status_code == 422
     assert client.post(endpoint(model) + "/renders", json={"revision": 1, "width": 0, "height": 240}).status_code == 422
+
+
+def test_bitmap_ingest_returns_immutable_draft_and_is_idempotent(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_INGEST_ROOT", str(tmp_path / "ingests"))
+    payload = tiny_png()
+    response = client.post("/api/ingests", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["requires_human_review"] is True
+    assert result["model"]["status"] == "draft"
+    assert result["model"]["source"]["kind"] == "bitmap"
+    assert result["model"]["source"]["sha256"] == result["ingest_id"]
+    assert client.get(f"/api/ingests/{result['ingest_id']}").json()["model"] == result["model"]
+    again = client.post("/api/ingests", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
+    assert again.status_code == 201
+    assert again.json()["ingest_id"] == result["ingest_id"]
+
+
+def test_bitmap_ingest_rejects_mismatched_or_unsupported_input(client):
+    assert client.post("/api/ingests", content=b"not-an-image", headers={"content-type": "image/png"}).status_code == 422
+    assert client.post("/api/ingests", content=b"%PDF-1.7", headers={"content-type": "application/pdf"}).status_code == 422
 
 
 def test_global_numeric_bounds_apply_to_all_model_values(client, model):

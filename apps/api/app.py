@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,9 +10,11 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
+from ingest import BitmapError
 from starlette.concurrency import run_in_threadpool
 from starlette.staticfiles import StaticFiles
 
+from .ingest import IngestUnavailable, ingest_bitmap_worker
 from .rendering import RenderUnavailable, render_revision
 from .revisions import (
     InvalidModel,
@@ -26,6 +29,7 @@ from .revisions import (
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEED = ROOT / "packages/spatial_core/tests/fixtures/confirmed-orthogonal-merge.json"
 MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_INGEST_BYTES = 20 * 1024 * 1024
 
 
 async def _body(request: Request, fields: set[str]) -> dict[str, Any]:
@@ -82,6 +86,14 @@ def create_app(
     async def render_handler(_: Request, exc: RenderUnavailable):
         return JSONResponse(status_code=503, content={"detail": str(exc), "code": "render_unavailable"})
 
+    @app.exception_handler(BitmapError)
+    async def bitmap_handler(_: Request, exc: BitmapError):
+        return JSONResponse(status_code=422, content={"detail": str(exc), "code": "invalid_bitmap"})
+
+    @app.exception_handler(IngestUnavailable)
+    async def ingest_handler(_: Request, exc: IngestUnavailable):
+        return JSONResponse(status_code=503, content={"detail": str(exc), "code": "ingest_unavailable"})
+
     @app.get("/api/models")
     def list_models():
         return store.list_models()
@@ -113,6 +125,52 @@ def create_app(
         manifest = await run_in_threadpool(render_revision, model, root, width=body["width"], height=body["height"])
         manifest["artifact_url"] = f"/render-artifacts/{model_id}/r{revision}-{envelope['hash'][:16]}"
         return manifest
+
+    @app.post("/api/ingests", status_code=201)
+    async def create_ingest(request: Request):
+        content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        if content_type not in {"image/png", "image/jpeg"}:
+            raise BitmapError("Content-Type must be image/png or image/jpeg")
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_INGEST_BYTES:
+                raise BitmapError("bitmap upload exceeds 20 MiB")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        signature_type = "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg" if data.startswith(b"\xff\xd8") else None
+        if signature_type != content_type:
+            raise BitmapError("Content-Type does not match bitmap signature")
+        filename = request.headers.get("x-filename", "upload.png" if content_type == "image/png" else "upload.jpg")
+        root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
+        draft = await run_in_threadpool(ingest_bitmap_worker, data, filename, os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
+        ingest_id = draft["source"]["sha256"]
+        directory = root / ingest_id
+        directory.mkdir(parents=True, exist_ok=True)
+        extension = ".png" if content_type == "image/png" else ".jpg"
+        (directory / f"source{extension}").write_bytes(data)
+        (directory / "draft.json").write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n")
+        manifest = {
+            "schema_version": "ingest-0.1",
+            "ingest_id": ingest_id,
+            "source": {"sha256": ingest_id, "media_type": content_type, "filename": filename},
+            "draft_model": "draft.json",
+            "requires_human_review": True,
+        }
+        (directory / "ingest-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        return {**manifest, "model": draft}
+
+    @app.get("/api/ingests/{ingest_id}")
+    def get_ingest(ingest_id: str):
+        if len(ingest_id) != 64 or any(char not in "0123456789abcdef" for char in ingest_id):
+            raise MissingRevision("Ingest not found")
+        root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
+        manifest_path = root / ingest_id / "ingest-manifest.json"
+        draft_path = root / ingest_id / "draft.json"
+        if not manifest_path.is_file() or not draft_path.is_file():
+            raise MissingRevision("Ingest not found")
+        return {"manifest": json.loads(manifest_path.read_text()), "model": json.loads(draft_path.read_text())}
 
     @app.post("/api/models/{model_id}/validate")
     async def validate(model_id: str, request: Request):
