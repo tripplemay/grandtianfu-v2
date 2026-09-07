@@ -318,6 +318,14 @@ export function ReviewDialog({
   const [checks, setChecks] = useState<Set<ReviewCheck>>(new Set());
   const [error, setError] = useState("");
   const objects = reviewObjects(model);
+  const blockers = Array.isArray(model.ingest?.hard_blockers)
+    ? model.ingest.hard_blockers.filter(
+      (item): item is { message: string } =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as { message?: unknown }).message === "string",
+      )
+    : [];
   const ready = valid && readyToReview(model, reviewed, checks, dirty) && !busy;
   useEffect(() => {
     setReviewed(new Set());
@@ -335,6 +343,11 @@ export function ReviewDialog({
           存在未保存修改
         </p>
       )}
+      {blockers.map((blocker, index) => (
+        <p className="workflow-error" role="alert" key={`${blocker.message}-${index}`}>
+          需要先处理：{blocker.message}
+        </p>
+      ))}
       <fieldset disabled={busy || dirty}>
         <label className="check-row review-all">
           <input

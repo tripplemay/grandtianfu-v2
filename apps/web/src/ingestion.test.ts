@@ -38,6 +38,13 @@ describe("import review gates", () => {
       false,
     );
   });
+  it("blocks confirmation when recognition leaves structural candidates", () => {
+    const blocked = {
+      ...model,
+      ingest: { ingest_id: "job", mm_per_pixel: 1, hard_blockers: [{ code: "partial_plan" }] },
+    } as SpatialModel;
+    expect(readyToReview(blocked, all, checks, false)).toBe(false);
+  });
 });
 
 describe("explicit camera", () => {

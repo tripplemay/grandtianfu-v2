@@ -123,6 +123,7 @@ export type SpatialModel = {
     width?: number;
     height?: number;
     warnings?: (string | { code: string; message: string })[];
+    hard_blockers?: unknown[];
     requires_human_review?: boolean;
     [key: string]: unknown;
   };

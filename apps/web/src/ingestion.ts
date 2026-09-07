@@ -32,9 +32,11 @@ export function readyToReview(
   dirty: boolean,
 ) {
   const objects = reviewObjects(model);
+  const blockers = model.ingest?.hard_blockers;
   return (
     !dirty &&
     model.status === "draft" &&
+    !(Array.isArray(blockers) && blockers.length > 0) &&
     model.rooms.length > 0 &&
     model.walls.length > 0 &&
     objects.every((item) => reviewed.has(item.id)) &&

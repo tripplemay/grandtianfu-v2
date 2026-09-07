@@ -119,6 +119,18 @@ def test_double_outline_is_paired_to_centerline_and_pixel_thickness():
     assert all(wall["thickness"] == 90 for wall in model["walls"])
 
 
+def test_distant_parallel_page_lines_are_not_paired_as_a_wall():
+    lines = [
+        {"axis": "h", "coordinate": 100.0, "start": 40.0, "end": 960.0, "thickness": 2.0,
+         "evidence_bbox": [40, 99, 921, 2], "strength": 1.0, "intervals": [[40.0, 960.0]], "gaps": []},
+        {"axis": "h", "coordinate": 220.0, "start": 40.0, "end": 960.0, "thickness": 2.0,
+         "evidence_bbox": [40, 219, 921, 2], "strength": 1.0, "intervals": [[40.0, 960.0]], "gaps": []},
+    ]
+    paired = bitmap._pair_parallel(lines, maximum_thickness=180)
+    assert len(paired) == 2
+    assert all("paired_evidence" not in line for line in paired)
+
+
 @pytest.mark.parametrize("format", ["PNG", "JPEG"])
 def test_complete_png_and_jpeg_have_real_pixel_geometry(format):
     data = encode(plan_image(), format=format)
@@ -214,6 +226,12 @@ def test_blank_open_boundary_and_diagonal_never_invent_a_room():
         ingest_bitmap(encode(diagonal), mm_per_pixel=10)
 
 
+def test_unassigned_structural_lines_block_confirmation_instead_of_becoming_facts():
+    image = plan_image()
+    ImageDraw.Draw(image).line((10, 10, 390, 10), fill="black", width=5)
+    model = ingest_bitmap(encode(image), mm_per_pixel=10)
+    assert model["ingest"]["hard_blockers"][0]["code"] == "partial_plan_requires_manual_trace"
+    assert model["ingest"]["hard_blockers"][0]["count"] > 0
 def test_optional_ocr_missing_runtime_is_explicit(monkeypatch):
     monkeypatch.setattr(bitmap.shutil, "which", lambda _: None)
     model = ingest_bitmap(plan_png(), mm_per_pixel=10)

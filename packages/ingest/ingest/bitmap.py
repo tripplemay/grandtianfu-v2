@@ -237,7 +237,14 @@ def _pair_parallel(lines: list[dict[str, Any]], maximum_thickness: float) -> lis
             separation = other["coordinate"] - line["coordinate"]
             overlap = min(line["end"], other["end"]) - max(line["start"], other["start"])
             longest = max(line["end"] - line["start"], other["end"] - other["start"])
-            if other_index not in consumed and max(line["thickness"], other["thickness"]) < separation <= maximum_thickness and overlap >= longest * 0.9:
+            # Pair only adjacent strokes.  A broad search radius makes page
+            # decorations and dimension lines look like a single very thick
+            # wall (e.g. 120 px apart in a 3000 px marketing plan).  The
+            # lower bound preserves the existing 1 px double-outline case;
+            # the upper bound scales with the thinner stroke so unrelated
+            # long lines cannot be absorbed into a wall candidate.
+            pair_limit = max(12.0, 4.0 * min(line["thickness"], other["thickness"]))
+            if other_index not in consumed and max(line["thickness"], other["thickness"]) < separation <= min(maximum_thickness, pair_limit) and overlap >= longest * 0.9:
                 partner = (other_index, other)
                 break
         if partner is None:
@@ -449,6 +456,13 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
         notes.append({"code": "unclassified_wall_gaps", "message": "Wall gaps are passage candidates, not classified doors or windows"})
     if recognition["unused"]:
         notes.append({"code": "unassigned_line_candidates", "message": "Some long lines do not bound a closed room", "count": len(recognition["unused"])})
+    hard_blockers = []
+    if recognition["unused"]:
+        hard_blockers.append({
+            "code": "partial_plan_requires_manual_trace",
+            "message": "Unassigned structural lines remain; crop or trace the complete floor plan before confirmation",
+            "count": len(recognition["unused"]),
+        })
     model = {
         "schema_version": "2.0", "profile": "orthogonal_v1", "model_id": model_id or f"bitmap-{job_id[:24]}",
         "revision": revision, "status": "draft", "units": {"length": "mm", "angle": "deg"},
@@ -462,7 +476,7 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                    "scale_status": "user_supplied", "calibration": {"value": scale, "provenance": "user_scale", "confidence": 1.0, "needs_review": True},
                    "preprocessing": recognition["metadata"], "candidates": candidates,
                    "evidence": {"ocr": ocr, "unassigned_lines": recognition["unused"]},
-                   "warnings": notes, "hard_blockers": [], "requires_human_review": True},
+                   "warnings": notes, "hard_blockers": hard_blockers, "requires_human_review": True},
     }
     try:
         validate_model(model)

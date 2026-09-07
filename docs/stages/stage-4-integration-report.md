@@ -31,6 +31,14 @@
 本轮修复了厚正交墙被 Hough 误判为斜线、形态学偶数核导致端点偏移、
 提前 EOI 的坏 JPEG 被容错接受、确认后 needs_review 标志不一致等实际问题。
 
+## 用户真实图片复现
+
+对用户提供的 3000 x 3499 JPEG（未提交到仓库）复现了原始失败。Pillow 解码正常，
+失败根因是尺寸标注/页面线条被错误配对为 124/147 px 伪墙，导致 `no_closed_rectangle`。
+收紧平行线配对后可生成草稿，但当前只得到右侧局部候选（1 room / 4 walls / 1 opening），
+并保留 31 条未归属结构线。系统写入 `partial_plan_requires_manual_trace` 硬阻断，
+前后端都不允许确认。这修复了错误拒绝，不等同于完成该真实四房户型的全图解析。
+
 ## 手工复现
 
 按 README 构建并启动工作台。导入 `examples/synthetic-room.png`，比例填写 `10 mm/px`。
