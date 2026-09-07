@@ -69,13 +69,41 @@ export const reviewChecks = {
   openings: "门窗位置与类型已核对",
   heights: "墙高、开口高度与标高已核对",
 };
-export type ReviewCheck = keyof typeof reviewChecks;
+const topologyChecks = {
+  topology: "共享边界、连通关系与 Merge 组已核对",
+  coverage: "所描绘区域内的房间与门窗完整（非自动全屋认证）",
+};
+export type ReviewCheck = keyof typeof reviewChecks | keyof typeof topologyChecks;
+
+export function reviewChecksFor(model: SpatialModel) {
+  return model.ingest?.topology ? { ...reviewChecks, ...topologyChecks } : reviewChecks;
+}
+
+export function canReviewTopology(model: SpatialModel) {
+  const topology = model.ingest?.topology as { version?: string; reviewed_object_ids?: unknown } | undefined;
+  return model.source?.provenance === "manual_topology" && topology?.version === "manual-topology-0.1" &&
+    Array.isArray(topology.reviewed_object_ids) &&
+    model.rooms.every((room) => room.kind?.trim() && room.kind.trim().toLowerCase() !== "unknown") &&
+    model.openings.every((opening) => ["door", "window", "passage"].includes(opening.kind));
+}
+
+export function reviewBlockers(model: SpatialModel): unknown[] {
+  const blockers = model.ingest?.hard_blockers ?? [];
+  const legacy = model.ingest?.blockers;
+  if (!Array.isArray(blockers)) return ["invalid_blockers"];
+  const remaining = blockers.filter((blocker) => !(
+    canReviewTopology(model) && typeof blocker === "object" && blocker !== null &&
+    (blocker as { code?: string }).code === "manual_trace_requires_topology_review"));
+  return legacy && (!Array.isArray(legacy) || legacy.length) ? [...remaining, legacy] : remaining;
+}
 
 export function reviewObjects(model: SpatialModel) {
   return [
     ...model.rooms.map((item) => ({ ...item, label: `房间 ${item.name}` })),
     ...model.walls.map((item) => ({ ...item, label: `墙体 ${item.id}` })),
     ...model.openings.map((item) => ({ ...item, label: `开口 ${item.id}` })),
+    ...(model.ingest?.topology ? Array.from(new Set(model.rooms.map((room) => room.merge_group_id).filter((id): id is string => !!id)))
+      .map((id) => ({ id, label: `Merge ${id}`, provenance: "manual_topology", confidence: undefined })) : []),
   ];
 }
 
@@ -86,15 +114,14 @@ export function readyToReview(
   dirty: boolean,
 ) {
   const objects = reviewObjects(model);
-  const blockers = model.ingest?.hard_blockers;
   return (
     !dirty &&
     model.status === "draft" &&
-    !(Array.isArray(blockers) && blockers.length > 0) &&
+    reviewBlockers(model).length === 0 &&
     model.rooms.length > 0 &&
     model.walls.length > 0 &&
     objects.every((item) => reviewed.has(item.id)) &&
-    Object.keys(reviewChecks).every((key) => checks.has(key as ReviewCheck))
+    Object.keys(reviewChecksFor(model)).every((key) => checks.has(key as ReviewCheck))
   );
 }
 

@@ -83,6 +83,6 @@ export function TopologyEditor({ model, result: _result, disabled = false, onTop
     </section>
     {error && <p className="workflow-error" role="alert" data-testid="topology-error">{error}</p>}
     <button className="button primary" type="button" data-testid="topology-submit" disabled={disabled || pending} onClick={() => void submit()}>{pending ? <LoaderCircle size={16} className="spin" /> : <DoorOpen size={16} />}生成拓扑审核草稿</button>
-    <p className="workflow-error" data-testid="topology-blocker">拓扑审核完成后仍需人工确认，当前不会进入家具摆放或照片级渲染。</p>
+    <p className="workflow-status" data-testid="topology-blocker">{model.status === "confirmed" && model.review?.topology_confirmation ? "人工描绘区域已确认" : "拓扑草稿尚未人工确认"}</p>
   </div>;
 }

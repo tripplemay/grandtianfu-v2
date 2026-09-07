@@ -116,6 +116,7 @@ export type SpatialModel = {
   cameras: Camera[];
   materials: Material[];
   content_hash?: string;
+  review?: { topology_confirmation?: { scope: string; resolved_blocker_codes: string[] } };
   ingest?: {
     ingest_id: string;
     mm_per_pixel: number;

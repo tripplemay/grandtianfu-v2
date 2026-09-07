@@ -10,7 +10,8 @@ import {
 import {
   cameraError,
   readyToReview,
-  reviewChecks,
+  reviewBlockers,
+  reviewChecksFor,
   reviewObjects,
   validScale,
   type IngestResult,
@@ -210,14 +211,13 @@ export function ReviewDialog({
   const [checks, setChecks] = useState<Set<ReviewCheck>>(new Set());
   const [error, setError] = useState("");
   const objects = reviewObjects(model);
-  const blockers = Array.isArray(model.ingest?.hard_blockers)
-    ? model.ingest.hard_blockers.filter(
+  const reviewChecks = reviewChecksFor(model);
+  const blockers = reviewBlockers(model).filter(
       (item): item is { message: string } =>
           typeof item === "object" &&
           item !== null &&
           typeof (item as { message?: unknown }).message === "string",
-      )
-    : [];
+      );
   const ready = valid && readyToReview(model, reviewed, checks, dirty) && !busy;
   useEffect(() => {
     setReviewed(new Set());
@@ -230,6 +230,7 @@ export function ReviewDialog({
         <span>{objects.length} 个对象</span>
         <span>{model.ingest?.mm_per_pixel} mm/px</span>
       </div>
+      {model.ingest?.topology !== undefined && <p className="workflow-status" data-testid="topology-review-scope">确认范围：人工描绘区域</p>}
       {dirty && (
         <p className="workflow-error" role="status">
           存在未保存修改

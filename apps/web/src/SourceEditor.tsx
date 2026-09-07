@@ -168,7 +168,7 @@ export function SourceEditor({ model, result, onCrop, onTrace, onDirtyChange, di
       <span className="muted">{scale} mm/px</span>
     </div>
     <section className="roi-review" aria-label="人工选择户型区域">
-      {initial && <p className="workflow-error" role="status" data-testid="trace-topology-blocker">描图草稿待门窗、连通性与 merge 拓扑校核</p>}
+      {initial && <p className={model.status === "confirmed" && model.review?.topology_confirmation ? "workflow-status" : "workflow-error"} role="status" data-testid="trace-topology-blocker">{model.status === "confirmed" && model.review?.topology_confirmation ? "人工描绘区域已确认" : "描图草稿待门窗、连通性与 merge 拓扑校核"}</p>}
       {typeof parentId === "string" && <p className="workflow-status" data-testid="roi-derived-draft">父任务 <code>{parentId.slice(0, 12)}</code> · 派生草稿</p>}
       <div className="roi-review-heading"><strong>户型区域</strong><span className="muted" data-testid="roi-count">{candidates.length} 个候选</span></div>
       {candidates.length ? <div className="roi-candidate-list" role="listbox" aria-label="户型区域候选">{candidates.map((c) =>

@@ -239,7 +239,7 @@ class RevisionStore:
 
     def confirm_ingest(self, model_id: str, ingest_id: str, *, expected_revision: int,
                        expected_hash: str, reviewed_object_ids: Any, checks: Any,
-                       reviewer: Any) -> dict[str, Any]:
+                       reviewer: Any, topology_reference: dict[str, Any] | None = None) -> dict[str, Any]:
         current = self.get(model_id)
         model = current["model"]
         if current["hash"] != expected_hash or model["revision"] != expected_revision:
@@ -252,12 +252,25 @@ class RevisionStore:
         scale = ingest.get("mm_per_pixel")
         if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
             raise InvalidModel("a verified user scale is required")
-        if ingest.get("hard_blockers") or ingest.get("blockers"):
-            raise InvalidModel("unresolved recognition blockers require corrected input")
+        topology_evidence = None
+        blockers = ingest.get("hard_blockers", [])
+        if blockers or ingest.get("blockers"):
+            if (ingest.get("blockers") or not isinstance(blockers, list) or len(blockers) != 1
+                    or not isinstance(blockers[0], dict)
+                    or blockers[0].get("code") != "manual_trace_requires_topology_review"
+                    or topology_reference is None):
+                raise InvalidModel("unresolved recognition blockers require corrected input")
+            from .topology_confirmation import topology_confirmation_evidence
+
+            topology_evidence = topology_confirmation_evidence(model, topology_reference)
         required_checks = {"scale", "geometry", "openings", "heights"}
+        if topology_evidence is not None:
+            required_checks.update({"topology", "coverage"})
         if not isinstance(checks, dict) or set(checks) != required_checks or any(value is not True for value in checks.values()):
-            raise InvalidModel("all scale, geometry, openings and heights checks must be acknowledged")
+            raise InvalidModel(f"all review checks must be acknowledged: {', '.join(sorted(required_checks))}")
         ids = {item["id"] for key in ("rooms", "walls", "openings") for item in model[key]}
+        if topology_evidence is not None:
+            ids.update(room["merge_group_id"] for room in model["rooms"] if room.get("merge_group_id"))
         if (not isinstance(reviewed_object_ids, list)
                 or any(not isinstance(value, str) for value in reviewed_object_ids)
                 or len(reviewed_object_ids) != len(ids) or set(reviewed_object_ids) != ids):
@@ -271,6 +284,8 @@ class RevisionStore:
             "reviewer": reviewer.strip(), "identity_kind": "self_reported_local",
             "reviewed_at": datetime.now(UTC).isoformat(timespec="microseconds"),
         }
+        if topology_evidence is not None:
+            review["topology_confirmation"] = topology_evidence
         return self.append(model_id, model, expected_revision, expected_hash,
                            "Human reviewed bitmap geometry and scale", "confirm", review=review)
 

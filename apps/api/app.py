@@ -231,7 +231,11 @@ def create_app(
     async def confirm_ingest(ingest_id: str, request: Request):
         body = await _body(request, {"expected_revision", "expected_hash", "reviewed_object_ids", "checks", "reviewer"})
         result = await run_in_threadpool(verified_ingest, ingest_id)
-        return await run_in_threadpool(store.confirm_ingest, result["model"]["model_id"], ingest_id, **body)
+        from .topology_confirmation import verify_topology_reference
+
+        reference = await run_in_threadpool(verify_topology_reference, result, intake_root())
+        return await run_in_threadpool(store.confirm_ingest, result["model"]["model_id"], ingest_id,
+                                      topology_reference=reference, **body)
 
     @app.post("/api/models/{model_id}/validate")
     async def validate(model_id: str, request: Request):

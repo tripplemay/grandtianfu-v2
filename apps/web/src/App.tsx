@@ -599,7 +599,7 @@ export default function App() {
     ids: string[],
     checks: Record<ReviewCheck, boolean>,
   ) {
-    if (!model?.ingest || !loaded || dirty || historical || !valid || busy)
+    if (!model?.ingest || !loaded || dirty || sourceDirty || historical || !valid || busy)
       return;
     setBusy(true);
     try {

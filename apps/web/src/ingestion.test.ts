@@ -3,6 +3,7 @@ import {
   cameraError,
   readyToReview,
   reviewChecks,
+  reviewChecksFor,
   reviewObjects,
   roiCandidates,
   validScale,
@@ -45,6 +46,30 @@ describe("import review gates", () => {
       ingest: { ingest_id: "job", mm_per_pixel: 1, hard_blockers: [{ code: "partial_plan" }] },
     } as SpatialModel;
     expect(readyToReview(blocked, all, checks, false)).toBe(false);
+  });
+});
+
+describe("manual topology confirmation", () => {
+  const topologyModel = {
+    ...model,
+    source: { provenance: "manual_topology" },
+    rooms: [{ id: "room-1", name: "Room", kind: "living", merge_group_id: "merge-1" }, { id: "room-2", name: "Dining", kind: "dining", merge_group_id: "merge-1" }],
+    openings: [{ id: "door-1", kind: "door" }],
+    ingest: { ingest_id: "topology-job", mm_per_pixel: 10,
+      topology: { version: "manual-topology-0.1", reviewed_object_ids: ["room-1", "room-2", "wall-1", "door-1", "merge-1"] },
+      hard_blockers: [{ code: "manual_trace_requires_topology_review" }] },
+  } as unknown as SpatialModel;
+  const all = new Set(reviewObjects(topologyModel).map((object) => object.id));
+  const checks = new Set(Object.keys(reviewChecksFor(topologyModel)) as ReviewCheck[]);
+  it("requires topology, coverage and merge group review", () => {
+    expect(readyToReview(topologyModel, all, checks, false)).toBe(true);
+    expect(readyToReview(topologyModel, all, new Set(Object.keys(reviewChecks) as ReviewCheck[]), false)).toBe(false);
+    expect(readyToReview(topologyModel, new Set([...all].filter((id) => id !== "merge-1")), checks, false)).toBe(false);
+  });
+  it("cannot waive unknown blockers, legacy blockers or unclassified rooms", () => {
+    expect(readyToReview({ ...topologyModel, ingest: { ...topologyModel.ingest!, hard_blockers: [{ code: "partial_plan" }] } }, all, checks, false)).toBe(false);
+    expect(readyToReview({ ...topologyModel, ingest: { ...topologyModel.ingest!, blockers: ["incomplete"] } }, all, checks, false)).toBe(false);
+    expect(readyToReview({ ...topologyModel, rooms: topologyModel.rooms.map((room) => ({ ...room, kind: "unknown" })) }, all, checks, false)).toBe(false);
   });
 });
 

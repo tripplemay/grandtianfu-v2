@@ -279,11 +279,13 @@ def test_free_roi_failure_then_manual_multiroom_trace(ingest_page, viewport):
     page.unroute("**/api/ingests/*/crop", reject)
     expect(page.get_by_test_id("roi-x")).to_have_value("20")
     page.get_by_test_id("trace-room-name").fill("Living")
+    page.get_by_role("combobox", name="描图房间类型", exact=True).select_option("living")
     fill_rect(page, "trace-room", [40.25, 40, 139.75, 200])
     page.get_by_test_id("trace-room-apply").click()
     expect(page.get_by_test_id("trace-room-select-0")).to_have_text("Living")
     page.get_by_role("button", name="新增房间", exact=True).click()
     page.get_by_test_id("trace-room-name").fill("Dining")
+    page.get_by_role("combobox", name="描图房间类型", exact=True).select_option("dining")
     fill_rect(page, "trace-room", [180, 40, 170, 200])
     page.get_by_test_id("trace-room-apply").click()
     page.get_by_role("button", name="撤销描图", exact=True).click()
@@ -341,6 +343,41 @@ def test_free_roi_failure_then_manual_multiroom_trace(ingest_page, viewport):
     assert topology["model"]["rooms"][0]["merge_group_id"]
     expect(page.get_by_text("拓扑审核草稿已生成 · 待人工确认", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="生成 3D", exact=True)).to_be_disabled()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.get_by_role("button", name="固定相机", exact=True).click()
+    for group, coordinates in {"position": (-3000, -3500, 5000), "look_at": (1900, 1400, 1000)}.items():
+        for axis, value in zip("xyz", coordinates):
+            page.get_by_test_id(f"camera-{group}-{axis}").fill(str(value))
+    page.get_by_test_id("camera-save").click()
+    page.get_by_role("button", name="保存", exact=True).click()
+    expect(page.get_by_text("v2 已保存", exact=True)).to_be_visible()
+    page.get_by_role("button", name="确认版本", exact=True).click()
+    expect(page.get_by_test_id("topology-review-scope")).to_be_visible()
+    page.get_by_test_id("review-all").check()
+    for key in ("scale", "geometry", "openings", "heights", "topology"):
+        page.get_by_test_id(f"review-{key}").check()
+    expect(page.get_by_test_id("review-submit")).to_be_disabled()
+    page.get_by_test_id("review-coverage").check()
+    page.get_by_test_id("review-submit").click()
+    expect(page.get_by_text("v3 人工校核已确认", exact=True)).to_be_visible()
+    latest = page.request.get(f"/api/models/{topology['model']['model_id']}/latest").json()
+    assert latest["model"]["review"]["topology_confirmation"]["scope"] == "traced_regions"
+    assert latest["model"]["ingest"] == topology["model"]["ingest"]
+    page.get_by_role("button", name="生成 3D", exact=True).click()
+    rendered = page.get_by_alt_text("空间模型三维渲染结果")
+    expect(rendered).to_be_visible(timeout=30000)
+    expect(rendered).to_have_js_property("complete", True)
+    assert rendered.evaluate("""img => {
+      const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 24;
+      const context = canvas.getContext('2d'); context.drawImage(img, 0, 0, 32, 24);
+      const data = context.getImageData(0, 0, 32, 24).data, colors = new Set();
+      for (let i = 0; i < data.length; i += 4) colors.add(`${data[i]},${data[i+1]},${data[i+2]}`);
+      return colors.size > 2;
+    }""")
+    screenshots = ROOT / "artifacts/stage4-confirmation-e2e"
+    screenshots.mkdir(parents=True, exist_ok=True)
+    rendered.screenshot(path=str(screenshots / f"shell-{viewport['width']}.png"))
+    page.screenshot(path=str(screenshots / f"confirmed-{viewport['width']}.png"), full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 

@@ -59,12 +59,17 @@
 
 真实像素识别、工作台校核与 3D 的集成检查点已通过独立验收，实际交付契约见
 `docs/specs/stage-4-integration.md`，结果见 `docs/stages/stage-4-integration-report.md`。
-当前等待用户确认；完整阶段门仍未完成，禁止提前进入阶段 5。
+该集成检查点用户已确认；完整阶段门仍未完成，禁止提前进入阶段 5。
 
 阶段 4 的 ROI 候选生成、人工裁剪、矩形描图和 4C2 拓扑审核已完成有界验收；实现和边界见
 `docs/specs/stage-4-manual-trace.md`、`docs/specs/stage-4-topology-review.md`、
 `docs/test-reports/stage-4-topology-acceptance.md`。独立复验报告见
-`docs/test-reports/stage-4-topology-independent-recheck.md`。当前仍保留人工确认阻断，等待用户确认后再进入下一阶段。
+`docs/test-reports/stage-4-topology-independent-recheck.md`。4C2 用户已确认。
+
+4C3 增加人工拓扑确认到 CPU 3D 的闭环，规格见
+`docs/specs/stage-4-topology-confirmation.md`。确认仅针对人工描绘区域；原始阻断保留为
+不可变证据，在新的 confirmed revision 中记录经过服务端验证的解除依据。
+当前等待独立验收，不能据此宣称自动全屋识别或完整阶段 4 完成。
 
 目标：把位图变成可确认的工程化平面草稿。
 
