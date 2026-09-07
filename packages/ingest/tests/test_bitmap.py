@@ -232,6 +232,38 @@ def test_unassigned_structural_lines_block_confirmation_instead_of_becoming_fact
     model = ingest_bitmap(encode(image), mm_per_pixel=10)
     assert model["ingest"]["hard_blockers"][0]["code"] == "partial_plan_requires_manual_trace"
     assert model["ingest"]["hard_blockers"][0]["count"] > 0
+
+
+def test_roi_candidate_is_crop_evidence_and_never_room_geometry():
+    model = ingest_bitmap(plan_png(), mm_per_pixel=10)
+    metadata = model["ingest"]["preprocessing"]
+    rois = metadata["roi_candidates"]
+    assert rois
+    roi = rois[0]
+    assert roi["kind"] == "floorplan_roi"
+    assert roi["evidence_bbox"] == roi["pixel_geometry"]["bbox"]
+    assert roi["selection"] == "manual_crop_or_trace"
+    assert roi["needs_review"] is True
+    assert roi["confidence"] < 0.9
+    x, y, width, height = roi["evidence_bbox"]
+    assert x < 40 and y < 30 and x + width > 360 and y + height > 270
+    assert all(candidate["kind"] != "floorplan_roi" for candidate in model["rooms"])
+    assert not any(room["rect"] == [x * 10, y * 10, width * 10, height * 10] for room in model["rooms"])
+    assert model["ingest"]["evidence"]["roi_candidates"][0]["source_asset_sha256"] == model["ingest"]["source_sha256"]
+
+
+def test_multiple_visual_plan_regions_remain_separate_ranked_roi_candidates():
+    image = Image.new("RGB", (800, 500), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 60, 350, 440), outline="black", width=5)
+    draw.rectangle((450, 100, 760, 400), outline="black", width=5)
+    metadata = preprocess_bitmap(load_bitmap(encode(image)))
+    rois = metadata["roi_candidates"]
+    assert len(rois) == 2
+    assert [candidate["rank"] for candidate in rois] == [1, 2]
+    assert [candidate["id"] for candidate in rois] == ["roi-candidate-1", "roi-candidate-2"]
+    assert all(candidate["needs_review"] for candidate in rois)
+    assert rois[0]["evidence_bbox"][0] > rois[1]["evidence_bbox"][0]
 def test_optional_ocr_missing_runtime_is_explicit(monkeypatch):
     monkeypatch.setattr(bitmap.shutil, "which", lambda _: None)
     model = ingest_bitmap(plan_png(), mm_per_pixel=10)

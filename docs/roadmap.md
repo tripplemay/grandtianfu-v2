@@ -61,6 +61,11 @@
 `docs/specs/stage-4-integration.md`，结果见 `docs/stages/stage-4-integration-report.md`。
 当前等待用户确认；完整阶段门仍未完成，禁止提前进入阶段 5。
 
+阶段 4 的 ROI 候选生成子项已完成并通过有界独立验收；完整 ROI 检查点仍为 PARTIAL。
+人工选择/裁剪、裁剪后新 ingest identity、坐标回映射和 ROI 过滤尚未完成，见
+`docs/specs/stage-4-roi.md`、`docs/decisions/0005-stage-4-floorplan-roi.md` 和
+`docs/test-reports/stage-4-roi-independent.md`。
+
 目标：把位图变成可确认的工程化平面草稿。
 
 - 实现预处理、墙线/房间/门窗候选识别和尺寸读取。

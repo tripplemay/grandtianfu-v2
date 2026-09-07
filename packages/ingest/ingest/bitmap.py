@@ -201,6 +201,74 @@ def _segments(binary: np.ndarray, axis: str, minimum: int) -> list[dict[str, Any
     return sorted(result, key=lambda item: (item["coordinate"], item["start"]))
 
 
+def _roi_candidates(gray: np.ndarray, binary: np.ndarray,
+                    line_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find visual plan regions without promoting an ROI to model geometry.
+
+    Marketing sheets commonly contain a title block, dimension strings, logos and a
+    smaller plan drawing.  A line-only connected component mask is deliberately used
+    here: dark text can be evidence inside a region, but cannot join two regions or
+    define a room.  Returned boxes are crop/trace suggestions and always need review.
+    """
+    height, width = binary.shape
+    short_line = max(15, int(min(height, width) * 0.025)) | 1
+    horizontal = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (short_line, 1))
+    )
+    vertical = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, short_line))
+    )
+    line_mask = cv2.bitwise_or(horizontal, vertical)
+    join_size = max(9, int(min(height, width) * 0.006)) | 1
+    joined = cv2.morphologyEx(
+        line_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (join_size, join_size))
+    )
+    joined = cv2.dilate(
+        joined, cv2.getStructuringElement(cv2.MORPH_RECT, (join_size, join_size))
+    )
+    count, _, stats, _ = cv2.connectedComponentsWithStats(joined, 8)
+    minimum_area = max(512, int(width * height * 0.001))
+    candidates: list[dict[str, Any]] = []
+    for index in range(1, count):
+        x, y, box_width, box_height, area = (int(value) for value in stats[index])
+        if area < minimum_area or box_width < short_line * 2 or box_height < short_line * 2:
+            continue
+        box = binary[y:y + box_height, x:x + box_width]
+        line_box = joined[y:y + box_height, x:x + box_width]
+        dark_ratio = float(np.mean(box > 0))
+        line_ratio = float(np.mean(line_box > 0))
+        intersects = []
+        for line in line_candidates:
+            lx, ly, lw, lh = line["evidence_bbox"]
+            if lx < x + box_width and lx + lw > x and ly < y + box_height and ly + lh > y:
+                intersects.append(line)
+        if not intersects:
+            continue
+        # Area and orthogonal-line coverage rank suggestions; this is not factual
+        # confidence and intentionally remains below the confirmation threshold.
+        area_ratio = area / float(width * height)
+        score = max(0.0, min(0.89, 0.35 + min(0.35, area_ratio) + min(0.19, line_ratio)))
+        candidates.append({
+            "id": "",
+            "kind": "floorplan_roi",
+            "pixel_geometry": {"bbox": [x, y, box_width, box_height]},
+            "evidence_bbox": [x, y, box_width, box_height],
+            "provenance": "orthogonal_line_component",
+            "confidence": round(score, 6),
+            "needs_review": True,
+            "selection": "manual_crop_or_trace",
+            "dark_pixel_ratio": round(dark_ratio, 6),
+            "line_pixel_ratio": round(line_ratio, 6),
+            "intersecting_line_count": len(intersects),
+            "parameters": {"short_line_px": short_line, "join_size_px": join_size},
+        })
+    candidates.sort(key=lambda item: (-item["confidence"], -item["intersecting_line_count"], item["evidence_bbox"]))
+    for rank, candidate in enumerate(candidates[:8], start=1):
+        candidate["id"] = f"roi-candidate-{rank}"
+        candidate["rank"] = rank
+    return candidates[:8]
+
+
 def _group_lines(segments: list[dict[str, Any]], maximum_gap: int) -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
     for segment in segments:
@@ -275,6 +343,7 @@ def _recognize(asset: BitmapAsset) -> dict[str, Any]:
     if float(np.mean(binary > 0)) > 0.65:
         raise BitmapError("unsupported_bitmap: insufficient light room interior")
     raw = _segments(binary, "h", minimum) + _segments(binary, "v", minimum)
+    roi_candidates = _roi_candidates(gray, binary, raw)
     hough = cv2.HoughLinesP(binary, 1, np.pi / 720, threshold=minimum,
                             minLineLength=minimum * 2, maxLineGap=2)
     if hough is not None:
@@ -335,6 +404,7 @@ def _recognize(asset: BitmapAsset) -> dict[str, Any]:
         "threshold": 180, "threshold_mode": "fixed_inverse", "denoise": "none", "contrast": "none",
         "minimum_line_length_px": minimum, "maximum_gap_px": maximum_gap,
         "mean_luma": round(float(gray.mean()), 6), "dark_ratio": round(float(np.mean(binary > 0)), 6),
+        "roi_candidates": roi_candidates,
         "line_candidates": raw,
     }}
 
@@ -475,7 +545,9 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                    "pixel_size": {"width": asset.width, "height": asset.height}, "mm_per_pixel": scale,
                    "scale_status": "user_supplied", "calibration": {"value": scale, "provenance": "user_scale", "confidence": 1.0, "needs_review": True},
                    "preprocessing": recognition["metadata"], "candidates": candidates,
-                   "evidence": {"ocr": ocr, "unassigned_lines": recognition["unused"]},
+                   "evidence": {"ocr": ocr, "unassigned_lines": recognition["unused"],
+                                "roi_candidates": [{**candidate, "source_asset_sha256": asset.sha256}
+                                                   for candidate in recognition["metadata"]["roi_candidates"]]},
                    "warnings": notes, "hard_blockers": hard_blockers, "requires_human_review": True},
     }
     try:

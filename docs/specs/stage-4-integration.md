@@ -12,6 +12,10 @@
   闭合矩形以外的图形不补成整幅图片边框，长斜线和无有效闭合候选明确拒绝。
 - 若检测到未归属的长结构线，仍可保留局部候选供叠加查看，但写入
   `partial_plan_requires_manual_trace` 硬阻断；不得确认或把局部结果解释为完整户型。
+- 宣传页会额外生成最多 8 个 `floorplan_roi` 视觉区域候选，保存在
+  `model.ingest.preprocessing.roi_candidates`。候选仅含 bbox/线密度/暗像素证据，
+  `needs_review=true` 且 `selection=manual_crop_or_trace`，不进入 rooms/walls/openings，
+  不删除 ROI 外的 `unassigned_lines`，也不能绕过局部户型的人工追踪阻断。
 - 共享墙缺口给出 merge 候选证据，不自动写入确定的 merge 事实。
 - Tesseract TSV 仅提供带 bbox/confidence 的数字证据；没有尺寸线端点关联，
   不自动选取比例，不宣称已完成 OCR 尺寸一致性检查。
