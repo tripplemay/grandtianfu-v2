@@ -57,6 +57,10 @@
 
 状态：**实施中（首期 PNG/JPEG 位图）**。规格与边界见 `docs/specs/stage-4-ingest.md`，决策见 `docs/decisions/0004-stage-4-ingest.md`。
 
+真实像素识别、工作台校核与 3D 的集成检查点已通过独立验收，实际交付契约见
+`docs/specs/stage-4-integration.md`，结果见 `docs/stages/stage-4-integration-report.md`。
+当前等待用户确认；完整阶段门仍未完成，禁止提前进入阶段 5。
+
 目标：把位图变成可确认的工程化平面草稿。
 
 - 实现预处理、墙线/房间/门窗候选识别和尺寸读取。

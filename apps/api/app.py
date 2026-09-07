@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -14,7 +14,7 @@ from ingest import BitmapError
 from starlette.concurrency import run_in_threadpool
 from starlette.staticfiles import StaticFiles
 
-from .ingest import IngestUnavailable, ingest_bitmap_worker
+from .ingest import IngestUnavailable, ingest_bitmap_worker, ingest_response, read_ingest
 from .rendering import RenderUnavailable, render_revision
 from .revisions import (
     InvalidModel,
@@ -55,8 +55,18 @@ def create_app(
     db_path: str | Path | None = None,
     seed_path: str | Path | None = DEFAULT_SEED,
     static_dir: str | Path | None = None,
+    ingest_root: str | Path | None = None,
 ) -> FastAPI:
     store = RevisionStore(db_path or os.environ.get("GT_DB_PATH", str(ROOT / "data/workbench.sqlite3")))
+
+    def intake_root() -> Path:
+        return Path(ingest_root or os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
+
+    def verified_ingest(ingest_id: str):
+        try:
+            return read_ingest(intake_root(), ingest_id)
+        except FileNotFoundError as exc:
+            raise MissingRevision("Ingest not found") from exc
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -127,7 +137,7 @@ def create_app(
         return manifest
 
     @app.post("/api/ingests", status_code=201)
-    async def create_ingest(request: Request):
+    async def create_ingest(request: Request, mm_per_pixel: float | None = None):
         content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
         if content_type not in {"image/png", "image/jpeg"}:
             raise BitmapError("Content-Type must be image/png or image/jpeg")
@@ -142,26 +152,32 @@ def create_app(
         signature_type = "image/png" if data.startswith(b"\x89PNG\r\n\x1a\n") else "image/jpeg" if data.startswith(b"\xff\xd8") else None
         if signature_type != content_type:
             raise BitmapError("Content-Type does not match bitmap signature")
-        filename = request.headers.get("x-filename", "upload.png" if content_type == "image/png" else "upload.jpg")
-        root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
-        ingest_root = os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests"))
-        draft = await run_in_threadpool(ingest_bitmap_worker, data, filename, ingest_root)
-        ingest_id = draft["source"]["sha256"]
-        directory = root / ingest_id
-        manifest = json.loads((directory / "ingest-manifest.json").read_text())
-        manifest.update({"ingest_id": ingest_id, "source": {"sha256": ingest_id, "media_type": content_type, "filename": filename}})
-        return {**manifest, "model": draft}
+        filename = unquote(request.headers.get("x-filename", "upload"))
+        if len(filename) > 255 or any(ord(char) < 32 for char in filename):
+            raise BitmapError("invalid display filename")
+        result = await run_in_threadpool(ingest_bitmap_worker, data, filename, intake_root(), mm_per_pixel=mm_per_pixel)
+        envelope = await run_in_threadpool(store.import_draft, result["model"])
+        return ingest_response(result, envelope)
 
     @app.get("/api/ingests/{ingest_id}")
     def get_ingest(ingest_id: str):
-        if len(ingest_id) != 64 or any(char not in "0123456789abcdef" for char in ingest_id):
-            raise MissingRevision("Ingest not found")
-        root = Path(os.environ.get("GT_INGEST_ROOT", str(ROOT / "artifacts/ingests")))
-        manifest_path = root / ingest_id / "ingest-manifest.json"
-        draft_path = root / ingest_id / "draft-model.json"
-        if not manifest_path.is_file() or not draft_path.is_file():
-            raise MissingRevision("Ingest not found")
-        return {"manifest": json.loads(manifest_path.read_text()), "model": json.loads(draft_path.read_text())}
+        result = verified_ingest(ingest_id)
+        envelope = store.import_draft(result["model"])
+        return ingest_response(result, envelope)
+
+    @app.get("/api/ingests/{ingest_id}/artifacts/{channel}")
+    def ingest_artifact(ingest_id: str, channel: str):
+        result = verified_ingest(ingest_id)
+        if channel not in {"source", "preprocessed", "draft_model", "preprocessing"}:
+            raise MissingRevision("Artifact not found")
+        filename = result["manifest"]["files"][channel]
+        return FileResponse(intake_root() / ingest_id / filename, headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.post("/api/ingests/{ingest_id}/confirm", status_code=201)
+    async def confirm_ingest(ingest_id: str, request: Request):
+        body = await _body(request, {"expected_revision", "expected_hash", "reviewed_object_ids", "checks", "reviewer"})
+        result = await run_in_threadpool(verified_ingest, ingest_id)
+        return await run_in_threadpool(store.confirm_ingest, result["model"]["model_id"], ingest_id, **body)
 
     @app.post("/api/models/{model_id}/validate")
     async def validate(model_id: str, request: Request):

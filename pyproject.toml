@@ -7,7 +7,7 @@ name = "grandtianfu-spatial-core"
 version = "0.1.0"
 description = "Canonical spatial model for a production-grade interior design system"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["Pillow>=12.3,<13", "opencv-python-headless>=4.13,<5", "numpy>=2.2,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.15,<1", "playwright>=1.55,<2"]

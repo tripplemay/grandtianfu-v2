@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   Armchair,
+  Camera,
   Check,
   ChevronRight,
   Download,
@@ -22,10 +23,18 @@ import {
   SlidersHorizontal,
   Trash2,
   Undo2,
+  Upload,
   X,
 } from "lucide-react";
 import { PlanCanvas, type Selection } from "./PlanCanvas";
 import { resizeRoom, roomResizeLimits } from "./editing";
+import {
+  CameraDialog,
+  ImportDialog,
+  IngestSource,
+  ReviewDialog,
+} from "./IngestWorkbench";
+import type { IngestResult, ReviewCheck } from "./ingestion";
 import {
   updateFurniture,
   type Envelope,
@@ -239,8 +248,15 @@ export default function App() {
   const [addKind, setAddKind] = useState<keyof typeof catalog>("coffee_table");
   const [invalidFields, setInvalidFields] = useState<Set<string>>(new Set());
   const [fieldEpoch, setFieldEpoch] = useState(0);
-  const [renderManifest, setRenderManifest] = useState<RenderManifest | null>(null);
+  const [renderManifest, setRenderManifest] = useState<RenderManifest | null>(
+    null,
+  );
   const [renderBusy, setRenderBusy] = useState(false);
+  const [workflowDialog, setWorkflowDialog] = useState<
+    "import" | "review" | "camera" | null
+  >(null);
+  const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
+  const [planView, setPlanView] = useState("plan");
   const reportField = useCallback(
     (key: string, valid: boolean) =>
       setInvalidFields((current) => {
@@ -256,6 +272,8 @@ export default function App() {
   const modalRef = useRef<HTMLDialogElement>(null);
   const model = timeline?.model;
   const modelKey = model ? serial(model) : "";
+  const currentModelKey = useRef(modelKey);
+  currentModelKey.current = modelKey;
   const dirty =
     (!!loaded && modelKey !== serial(loaded.model)) || invalidFields.size > 0;
   const historical =
@@ -269,6 +287,7 @@ export default function App() {
     setLoaded(envelope);
     setTimeline({ model: envelope.model, past: [], future: [] });
     setSelection(null);
+    setRenderManifest(null);
   }
 
   async function load(id?: string, revision?: number) {
@@ -301,6 +320,25 @@ export default function App() {
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => setRenderManifest(null), [modelKey]);
+  useEffect(() => {
+    const id = model?.ingest?.ingest_id;
+    setIngestResult(null);
+    setPlanView("plan");
+    if (!id) return;
+    const controller = new AbortController();
+    void request<IngestResult>(`/api/ingests/${encodeURIComponent(id)}`, {
+      signal: controller.signal,
+    })
+      .then((result) => {
+        if (!controller.signal.aborted) setIngestResult(result);
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted)
+          setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => controller.abort();
+  }, [model?.ingest?.ingest_id]);
   useEffect(() => {
     if (!model) return;
     const controller = new AbortController();
@@ -395,6 +433,10 @@ export default function App() {
   }
 
   async function save(action: "save" | "confirm", restore = false) {
+    if (action === "confirm" && model?.ingest) {
+      setWorkflowDialog("review");
+      return;
+    }
     if (
       !model ||
       !latest ||
@@ -445,21 +487,97 @@ export default function App() {
   }
 
   async function render3d() {
-    if (!model || !["confirmed", "locked"].includes(model.status) || renderBusy) return;
+    if (
+      !model ||
+      dirty ||
+      busy ||
+      !model.cameras.length ||
+      !["confirmed", "locked"].includes(model.status) ||
+      renderBusy
+    )
+      return;
     setRenderBusy(true);
     setError("");
+    const requestedModelKey = modelKey;
     try {
-      const result = await request<RenderManifest>(`/api/models/${encodeURIComponent(model.model_id)}/renders`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ revision: model.revision, width: 800, height: 600 }),
-      });
-      setRenderManifest(result);
-      setNotice(`v${result.model_revision} 3D 渲染完成`);
+      const result = await request<RenderManifest>(
+        `/api/models/${encodeURIComponent(model.model_id)}/renders`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            revision: model.revision,
+            width: 800,
+            height: 600,
+          }),
+        },
+      );
+      if (currentModelKey.current === requestedModelKey) {
+        setRenderManifest(result);
+        setNotice(`v${result.model_revision} 3D 渲染完成`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRenderBusy(false);
+    }
+  }
+
+  async function importImage(file: File, scale: number, signal: AbortSignal) {
+    const result = await request<IngestResult>(
+      `/api/ingests?mm_per_pixel=${encodeURIComponent(scale)}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": file.type,
+          "X-Filename": encodeURIComponent(file.name),
+        },
+        body: file,
+        signal,
+      },
+    );
+    const [summaries, history] = await Promise.all([
+      request<Summary[]>("/api/models", { signal }),
+      request<Revision[]>(
+        `/api/models/${encodeURIComponent(result.envelope.model.model_id)}/revisions`,
+        { signal },
+      ),
+    ]);
+    if (signal.aborted) return;
+    setModels(summaries);
+    setRevisions(history);
+    setLatest(result.envelope);
+    install(result.envelope);
+    setNotice("户型图已导入 · 待人工校核");
+    setMobilePanel("plan");
+  }
+
+  async function confirmIngest(
+    ids: string[],
+    checks: Record<ReviewCheck, boolean>,
+  ) {
+    if (!model?.ingest || !loaded || dirty || historical || !valid || busy)
+      return;
+    setBusy(true);
+    try {
+      const result = await request<Envelope>(
+        `/api/ingests/${encodeURIComponent(model.ingest.ingest_id)}/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision: loaded.model.revision,
+            expected_hash: loaded.hash,
+            reviewed_object_ids: ids,
+            checks,
+            reviewer: "local-user",
+          }),
+        },
+      );
+      await load(result.model.model_id);
+      setNotice(`v${result.model.revision} 人工校核已确认`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -607,6 +725,15 @@ export default function App() {
           </span>
         </div>
         <div className="header-actions">
+          <button
+            className="button"
+            data-testid="open-ingest"
+            disabled={busy || renderBusy}
+            onClick={() => guard(() => setWorkflowDialog("import"))}
+          >
+            <Upload size={16} />
+            导入
+          </button>
           <span
             className={`status-badge ${dirty ? "draft" : (model?.status ?? "draft")}`}
           >
@@ -628,14 +755,16 @@ export default function App() {
               readOnly || !valid || (!dirty && model?.status === "confirmed")
             }
             onClick={() =>
-              setDialog({
-                title: "确认当前空间模型？",
-                body: "确认将创建一个新的人工确认版本。",
-                command: "确认版本",
-                action: () => {
-                  void save("confirm");
-                },
-              })
+              model?.ingest
+                ? setWorkflowDialog("review")
+                : setDialog({
+                    title: "确认当前空间模型？",
+                    body: "确认将创建一个新的人工确认版本。",
+                    command: "确认版本",
+                    action: () => {
+                      void save("confirm");
+                    },
+                  })
             }
           >
             <Check size={16} />
@@ -643,11 +772,22 @@ export default function App() {
           </button>
           <button
             className="button"
-            disabled={renderBusy || !model || !["confirmed", "locked"].includes(model.status)}
+            disabled={
+              renderBusy ||
+              busy ||
+              dirty ||
+              !model ||
+              !model.cameras.length ||
+              !["confirmed", "locked"].includes(model.status)
+            }
             onClick={() => void render3d()}
             title="对当前已确认版本启动 CPU 3D 渲染"
           >
-            {renderBusy ? <LoaderCircle className="spin" size={16} /> : <Layers size={16} />}
+            {renderBusy ? (
+              <LoaderCircle className="spin" size={16} />
+            ) : (
+              <Layers size={16} />
+            )}
             {renderBusy ? "渲染中" : "生成 3D"}
           </button>
         </div>
@@ -874,13 +1014,44 @@ export default function App() {
           <section className="plan-pane" aria-label="平面视图">
             <div className="plan-heading">
               <div>
-                <span className="view-tab">二维平面</span>
+                {model.ingest ? (
+                  <div
+                    className="view-switch"
+                    role="group"
+                    aria-label="模型视图"
+                  >
+                    <button
+                      className="source-tab"
+                      aria-pressed={planView === "plan"}
+                      onClick={() => setPlanView("plan")}
+                    >
+                      二维平面
+                    </button>
+                    <button
+                      className="source-tab"
+                      data-testid="source-view"
+                      aria-pressed={planView === "source"}
+                      onClick={() => setPlanView("source")}
+                    >
+                      源图对照
+                    </button>
+                  </div>
+                ) : (
+                  <span className="view-tab">二维平面</span>
+                )}
                 <span className="muted">
                   {model.rooms.length} 房间 / {model.furniture_instances.length}{" "}
                   家具
                 </span>
               </div>
               <div className="edit-history">
+                <IconButton
+                  label="固定相机"
+                  disabled={readOnly || invalidFields.size > 0}
+                  onClick={() => setWorkflowDialog("camera")}
+                >
+                  <Camera size={17} />
+                </IconButton>
                 <IconButton
                   label="撤销"
                   disabled={readOnly || !timeline?.past.length}
@@ -897,20 +1068,47 @@ export default function App() {
                 </IconButton>
               </div>
             </div>
-            <PlanCanvas
-              model={model}
-              selection={selection}
-              onSelect={choose}
-              onEdit={edit}
-              readOnly={readOnly || invalidFields.size > 0 || !!dialog}
-            />
+            {planView === "source" && model.ingest ? (
+              ingestResult ? (
+                <IngestSource model={model} result={ingestResult} />
+              ) : (
+                <div className="loading-state">
+                  <LoaderCircle size={24} className="spin" />
+                </div>
+              )
+            ) : (
+              <PlanCanvas
+                model={model}
+                selection={selection}
+                onSelect={choose}
+                onEdit={edit}
+                readOnly={
+                  readOnly ||
+                  invalidFields.size > 0 ||
+                  !!dialog ||
+                  !!workflowDialog
+                }
+              />
+            )}
             {renderManifest && (
               <section className="render-preview" aria-label="三维渲染预览">
                 <div className="render-preview-heading">
                   <span className="view-tab">CPU 3D 预览</span>
-                  <span className="muted">v{renderManifest.model_revision} · {renderManifest.camera.width}×{renderManifest.camera.height}</span>
+                  <span className="muted">
+                    v{renderManifest.model_revision} ·{" "}
+                    {renderManifest.camera.width}×{renderManifest.camera.height}
+                  </span>
+                  <IconButton
+                    label="关闭三维预览"
+                    onClick={() => setRenderManifest(null)}
+                  >
+                    <X size={15} />
+                  </IconButton>
                 </div>
-                <img src={`${renderManifest.artifact_url}/${renderManifest.files.color}`} alt="空间模型三维渲染结果" />
+                <img
+                  src={`${renderManifest.artifact_url}/${renderManifest.files.color}`}
+                  alt="空间模型三维渲染结果"
+                />
               </section>
             )}
           </section>
@@ -936,7 +1134,11 @@ export default function App() {
                   {!selection && (
                     <div className="model-summary">
                       <div className="section-label">空间模型</div>
-                      <h3>客厅与门厅</h3>
+                      <h3>
+                        {model.rooms
+                          .map((item) => roomName(item.name))
+                          .join(" / ") || "待校核户型"}
+                      </h3>
                       <dl>
                         <dt>轮廓</dt>
                         <dd>正交墙体</dd>
@@ -954,6 +1156,8 @@ export default function App() {
                         </dd>
                         <dt>来源</dt>
                         <dd>{model.source.provenance}</dd>
+                        <dt>置信度</dt>
+                        <dd>{Math.round(model.confidence * 100)}%</dd>
                         <dt>版本</dt>
                         <dd>v{model.revision}</dd>
                       </dl>
@@ -983,6 +1187,23 @@ export default function App() {
                               : wall?.id}
                       </h3>
                       <code>{selection.id}</code>
+                      {!furniture && (
+                        <dl>
+                          <dt>来源</dt>
+                          <dd>
+                            {(room ?? wall ?? opening)?.provenance ??
+                              model.source.provenance}
+                          </dd>
+                          <dt>置信度</dt>
+                          <dd>
+                            {Math.round(
+                              ((room ?? wall ?? opening)?.confidence ??
+                                model.confidence) * 100,
+                            )}
+                            %
+                          </dd>
+                        </dl>
+                      )}
                     </div>
                   )}
                   <fieldset disabled={readOnly}>
@@ -1236,6 +1457,27 @@ export default function App() {
                     {opening && (
                       <>
                         <label className="select-field">
+                          开口类型
+                          <select
+                            aria-label="开口类型"
+                            value={opening.kind}
+                            onChange={(event) =>
+                              edit({
+                                ...model,
+                                openings: model.openings.map((item) =>
+                                  item.id === opening.id
+                                    ? { ...item, kind: event.target.value }
+                                    : item,
+                                ),
+                              })
+                            }
+                          >
+                            <option value="passage">通道</option>
+                            <option value="door">门</option>
+                            <option value="window">窗</option>
+                          </select>
+                        </label>
+                        <label className="select-field">
                           宿主墙
                           <select
                             aria-label="宿主墙"
@@ -1307,6 +1549,31 @@ export default function App() {
                       </>
                     )}
                   </fieldset>
+                  {model.ingest && (
+                    <div
+                      className="ingest-evidence"
+                      data-testid="ingest-warnings"
+                    >
+                      <h4>导入记录</h4>
+                      <dl>
+                        <dt>比例</dt>
+                        <dd>{model.ingest.mm_per_pixel} mm/px</dd>
+                        <dt>相机</dt>
+                        <dd>
+                          {model.cameras.length
+                            ? model.cameras[0].id
+                            : "未设置"}
+                        </dd>
+                      </dl>
+                      {model.ingest.warnings?.map((warning, index) => (
+                        <p key={index}>
+                          {typeof warning === "string"
+                            ? warning
+                            : warning.message}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                 </form>
               </FieldValidity.Provider>
             </FieldTransaction.Provider>
@@ -1396,6 +1663,32 @@ export default function App() {
           </button>
         </div>
       </dialog>
+      {workflowDialog === "import" && (
+        <ImportDialog
+          onClose={() => setWorkflowDialog(null)}
+          onImport={importImage}
+        />
+      )}
+      {workflowDialog === "review" && model && (
+        <ReviewDialog
+          key={`${model.model_id}-${model.revision}`}
+          model={model}
+          dirty={dirty}
+          busy={busy}
+          valid={valid && !historical}
+          onClose={() => setWorkflowDialog(null)}
+          onConfirm={confirmIngest}
+        />
+      )}
+      {workflowDialog === "camera" && model && (
+        <CameraDialog
+          initial={model.cameras[0]}
+          onClose={() => setWorkflowDialog(null)}
+          onSave={(camera) =>
+            edit({ ...model, cameras: [camera, ...model.cameras.slice(1)] })
+          }
+        />
+      )}
     </div>
   );
 }

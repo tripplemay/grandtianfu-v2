@@ -21,6 +21,8 @@ export type Room = {
   boundary_wall_ids: string[];
   merge_group_id?: string;
   visible?: boolean;
+  provenance?: string;
+  confidence?: number;
 };
 
 export type Wall = {
@@ -32,6 +34,8 @@ export type Wall = {
   thickness: number;
   bottom_z: number;
   top_z: number;
+  provenance?: string;
+  confidence?: number;
 };
 
 export type Opening = {
@@ -43,6 +47,8 @@ export type Opening = {
   height: number;
   bottom_z: number;
   opening_direction?: string;
+  provenance?: string;
+  confidence?: number;
 };
 
 export type FurnitureTransform = {
@@ -110,6 +116,16 @@ export type SpatialModel = {
   cameras: Camera[];
   materials: Material[];
   content_hash?: string;
+  ingest?: {
+    ingest_id: string;
+    mm_per_pixel: number;
+    pixel_size?: { width: number; height: number };
+    width?: number;
+    height?: number;
+    warnings?: (string | { code: string; message: string })[];
+    requires_human_review?: boolean;
+    [key: string]: unknown;
+  };
 };
 
 export type Envelope = {

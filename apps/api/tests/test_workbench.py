@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
 import sqlite3
-import struct
-import zlib
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 from spatial_core import canonical_hash
 
 from apps.api.app import DEFAULT_SEED, create_app
@@ -48,12 +49,11 @@ def save_body(current, model=None, action="save"):
 
 
 def tiny_png() -> bytes:
-    pixels = bytes([255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255])
-    raw = b"\x00" + pixels[:6] + b"\x00" + pixels[6:]
-    def chunk(kind: bytes, payload: bytes) -> bytes:
-        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff)
-    header = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    image = Image.new("RGB", (320, 240), "white")
+    ImageDraw.Draw(image).rectangle((40, 40, 280, 200), outline="black", width=7)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 def test_startup_is_explicit_and_seed_is_idempotent(tmp_path, model):
@@ -260,15 +260,16 @@ def test_render_rejects_draft_and_invalid_dimensions(client, model):
 def test_bitmap_ingest_returns_immutable_draft_and_is_idempotent(client, tmp_path, monkeypatch):
     monkeypatch.setenv("GT_INGEST_ROOT", str(tmp_path / "ingests"))
     payload = tiny_png()
-    response = client.post("/api/ingests", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
+    response = client.post("/api/ingests?mm_per_pixel=10", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
     assert response.status_code == 201, response.text
     result = response.json()
     assert result["requires_human_review"] is True
     assert result["model"]["status"] == "draft"
     assert result["model"]["source"]["kind"] == "bitmap"
-    assert result["model"]["source"]["sha256"] == result["ingest_id"]
+    assert result["model"]["source"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert result["model"]["ingest"]["ingest_id"] == result["ingest_id"]
     assert client.get(f"/api/ingests/{result['ingest_id']}").json()["model"] == result["model"]
-    again = client.post("/api/ingests", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
+    again = client.post("/api/ingests?mm_per_pixel=10", content=payload, headers={"content-type": "image/png", "x-filename": "plan.png"})
     assert again.status_code == 201
     assert again.json()["ingest_id"] == result["ingest_id"]
 

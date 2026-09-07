@@ -470,6 +470,8 @@ def render_model(model: dict[str, Any], output_dir: str | Path, *, width: int | 
             "model_id": model["model_id"],
             "model_revision": model["revision"],
             "model_hash": model_hash,
+            "source": model["source"],
+            "review": model.get("review"),
             "camera": {"id": camera.source_id, "width": camera.width, "height": camera.height, "input_projection": "perspective", "projection": "cpu-perspective-v1", "fov_deg": FOV_DEG, "near_mm": NEAR_MM, "far_mm": FAR_MM, "world_axes": "X=east,Y=south,Z=up"},
             "camera_id": camera.source_id,
             "camera_hash": camera_hash,

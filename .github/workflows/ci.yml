@@ -36,6 +36,9 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --frozen --extra dev --extra api
 
+      - name: Install dimension evidence OCR
+        run: sudo apt-get install -y tesseract-ocr
+
       - name: Check Python tests
         run: uv run pytest -q
 
@@ -64,7 +67,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stage-2-browser-evidence
-          path: artifacts/e2e/
+          name: workbench-browser-evidence
+          path: |
+            artifacts/e2e/
+            artifacts/stage4-e2e/
           if-no-files-found: ignore
           retention-days: 7

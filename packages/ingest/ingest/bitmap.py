@@ -1,25 +1,36 @@
-"""PNG/JPEG intake and deterministic candidate draft generation.
-
-This module intentionally produces a reviewable draft only.  It does not
-claim that image bounds are measured architectural boundaries and never
-changes the draft status to ``confirmed``.
-"""
+"""Bounded, evidence-preserving CPU recognition of orthogonal bitmap plans."""
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import math
-import struct
-import zlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
+import cv2
+import numpy as np
+from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
+from PIL import __version__ as pillow_version
 from spatial_core import validate_model
+
+ALGORITHM_VERSION = "orthogonal-cv-0.2"
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_SIDE = 12_000
+MAX_PIXELS = 50_000_000
 
 
 class BitmapError(ValueError):
-    """Raised when a bitmap is unsupported or cannot produce a draft."""
+    """Unsupported, corrupt, or insufficiently constrained bitmap input."""
 
 
 @dataclass(frozen=True)
@@ -29,267 +40,432 @@ class BitmapAsset:
     width: int
     height: int
     sha256: str
+    normalized_png: bytes
+    normalization: dict[str, Any]
 
 
-def _u32(data: bytes, offset: int) -> int:
-    if offset + 4 > len(data):
-        raise BitmapError("truncated bitmap header")
-    return struct.unpack_from(">I", data, offset)[0]
+def canonical_json(document: dict[str, Any]) -> str:
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def _read_png(data: bytes) -> tuple[int, int, list[int]]:
-    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise BitmapError("invalid PNG signature")
-    offset = 8
-    width = height = bit_depth = color_type = None
-    compressed = bytearray()
-    saw_iend = False
-    while offset + 12 <= len(data):
-        length = _u32(data, offset)
-        end = offset + 12 + length
-        if end > len(data):
-            raise BitmapError("truncated PNG chunk")
-        kind = data[offset + 4 : offset + 8]
-        payload = data[offset + 8 : offset + 8 + length]
-        expected_crc = _u32(data, offset + 8 + length)
-        actual_crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
-        if actual_crc != expected_crc:
-            raise BitmapError("PNG chunk CRC mismatch")
-        offset = end
-        if kind == b"IHDR":
-            if length != 13:
-                raise BitmapError("invalid PNG IHDR")
-            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
-                ">IIBBBBB", payload
-            )
-            if not width or not height:
-                raise BitmapError("PNG dimensions must be positive")
-            if bit_depth != 8 or color_type not in (0, 2, 4, 6):
-                raise BitmapError("PNG requires 8-bit grayscale, RGB, or RGBA")
-            if compression != 0 or filtering != 0 or interlace != 0:
-                raise BitmapError("PNG compression/filter/interlace mode unsupported")
-        elif kind == b"IDAT":
-            compressed.extend(payload)
-        elif kind == b"IEND":
-            if length != 0:
-                raise BitmapError("invalid PNG IEND")
-            saw_iend = True
-            break
-    if width is None or height is None:
-        raise BitmapError("PNG is missing IHDR")
-    if not saw_iend:
-        raise BitmapError("PNG is missing IEND")
+def _scale(value: float | None) -> float:
+    if value is None:
+        raise BitmapError("scale_required: explicit mm_per_pixel is required")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise BitmapError("invalid_scale: mm_per_pixel must be finite and > 0")
+    return float(value)
+
+
+@lru_cache(maxsize=1)
+def _ocr_runtime() -> dict[str, Any]:
+    executable = shutil.which("tesseract")
+    if not executable:
+        return {"engine": None, "version": None}
     try:
-        raw = zlib.decompress(bytes(compressed))
-    except zlib.error as exc:
-        raise BitmapError("invalid PNG pixel stream") from exc
-    channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
-    stride = width * channels
-    expected = height * (stride + 1)
-    if len(raw) != expected:
-        raise BitmapError("PNG pixel stream has unexpected length")
-    rows: list[bytes] = []
-    cursor = 0
-    previous = bytes(stride)
-    for _ in range(height):
-        filter_type = raw[cursor]
-        cursor += 1
-        encoded = raw[cursor : cursor + stride]
-        cursor += stride
-        row = bytearray(encoded)
-        for index, value in enumerate(row):
-            left = row[index - channels] if index >= channels else 0
-            up = previous[index]
-            upper_left = previous[index - channels] if index >= channels else 0
-            if filter_type == 1:
-                row[index] = (value + left) & 255
-            elif filter_type == 2:
-                row[index] = (value + up) & 255
-            elif filter_type == 3:
-                row[index] = (value + ((left + up) // 2)) & 255
-            elif filter_type == 4:
-                prediction = left + up - upper_left
-                distances = (abs(prediction - left), abs(prediction - up), abs(prediction - upper_left))
-                row[index] = (value + (left if distances[0] <= distances[1] and distances[0] <= distances[2] else up if distances[1] <= distances[2] else upper_left)) & 255
-            elif filter_type != 0:
-                raise BitmapError(f"unsupported PNG filter {filter_type}")
-        decoded = bytes(row)
-        rows.append(decoded)
-        previous = decoded
-    # Downsample deterministically; candidates need signal statistics, not a full image copy.
-    grayscale: list[int] = []
-    for row in rows:
-        for pixel in range(width):
-            base = pixel * channels
-            if color_type == 0:
-                value = row[base]
-            elif color_type == 2:
-                r, g, b = row[base : base + 3]
-                value = (299 * r + 587 * g + 114 * b) // 1000
-            elif color_type == 4:
-                luminance, alpha = row[base : base + 2]
-                value = (luminance * alpha + 255 * (255 - alpha)) // 255
-            else:
-                r, g, b, alpha = row[base : base + 4]
-                value = ((299 * r + 587 * g + 114 * b) * alpha + 255000 * (255 - alpha)) // 255000
-            grayscale.append(value)
-    return width, height, grayscale
+        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=5, check=False)
+        version = result.stdout.splitlines()[0] if result.returncode == 0 and result.stdout else "unavailable"
+    except (OSError, subprocess.TimeoutExpired):
+        version = "unavailable"
+    return {"engine": "tesseract", "version": version}
 
 
-def _read_jpeg(data: bytes) -> tuple[int, int]:
-    if not data.startswith(b"\xff\xd8"):
-        raise BitmapError("invalid JPEG signature")
-    index = 2
-    sof = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
-    while index + 3 < len(data):
-        if data[index] != 0xFF:
-            index += 1
-            continue
-        while index < len(data) and data[index] == 0xFF:
-            index += 1
-        marker = data[index]
-        index += 1
-        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-            continue
-        if index + 2 > len(data):
-            break
-        length = struct.unpack_from(">H", data, index)[0]
-        if length < 2 or index + length > len(data):
-            raise BitmapError("truncated JPEG segment")
-        if marker in sof:
-            if length < 7:
-                raise BitmapError("invalid JPEG frame")
-            height, width = struct.unpack_from(">HH", data, index + 3)
-            if not width or not height:
-                raise BitmapError("JPEG dimensions must be positive")
-            return width, height
-        index += length
-    raise BitmapError("JPEG frame dimensions not found")
+def ingest_key(data: bytes, mm_per_pixel: float | None) -> str:
+    parameters = {"source_sha256": hashlib.sha256(data).hexdigest(), "mm_per_pixel": _scale(mm_per_pixel),
+                  "algorithm_version": ALGORITHM_VERSION, "pillow_version": pillow_version,
+                  "opencv_version": cv2.__version__, "numpy_version": np.__version__, "ocr": _ocr_runtime()}
+    return hashlib.sha256(canonical_json(parameters).encode()).hexdigest()
+
+
+def _png(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=False, compress_level=6)
+    return buffer.getvalue()
+
+
+def _orientation_transform(orientation: int, width: int, height: int) -> list[list[int]]:
+    transforms = {
+        1: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        2: [[-1, 0, width - 1], [0, 1, 0], [0, 0, 1]],
+        3: [[-1, 0, width - 1], [0, -1, height - 1], [0, 0, 1]],
+        4: [[1, 0, 0], [0, -1, height - 1], [0, 0, 1]],
+        5: [[0, 1, 0], [1, 0, 0], [0, 0, 1]],
+        6: [[0, -1, height - 1], [1, 0, 0], [0, 0, 1]],
+        7: [[0, -1, height - 1], [-1, 0, width - 1], [0, 0, 1]],
+        8: [[0, 1, 0], [-1, 0, width - 1], [0, 0, 1]],
+    }
+    return transforms[orientation]
+
+
+def _verify_jpeg_pixels(data: bytes) -> None:
+    # Pillow/libjpeg can silently fill a prematurely terminated entropy stream.
+    # An isolated second decoder makes libjpeg's corruption warnings observable.
+    script = (
+        "import cv2,numpy as np,sys; "
+        "image=cv2.imdecode(np.frombuffer(sys.stdin.buffer.read(),dtype=np.uint8),cv2.IMREAD_COLOR); "
+        "sys.exit(0 if image is not None else 2)"
+    )
+    try:
+        result = subprocess.run([sys.executable, "-c", script], input=data, capture_output=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BitmapError("invalid_bitmap: strict JPEG decode failed") from exc
+    if result.returncode or result.stderr:
+        raise BitmapError("invalid_bitmap: corrupt or truncated JPEG pixel stream")
 
 
 def load_bitmap(data: bytes, filename: str = "upload") -> BitmapAsset:
-    """Validate a PNG/JPEG upload and return immutable identifying metadata."""
+    """Fully decode pixels before admitting a content-addressed source."""
     if not isinstance(data, (bytes, bytearray)) or not data:
-        raise BitmapError("bitmap upload must be non-empty bytes")
+        raise BitmapError("invalid_bitmap: upload must be non-empty bytes")
     data = bytes(data)
+    if len(data) > MAX_FILE_BYTES:
+        raise BitmapError("input_too_large: maximum file size is 20 MiB")
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        width, height, _ = _read_png(data)
-        media_type = "image/png"
+        expected_format, media_type = "PNG", "image/png"
+        if not data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+            raise BitmapError("invalid_bitmap: PNG is missing final IEND")
     elif data.startswith(b"\xff\xd8"):
-        width, height = _read_jpeg(data)
-        media_type = "image/jpeg"
+        expected_format, media_type = "JPEG", "image/jpeg"
+        if not data.endswith(b"\xff\xd9"):
+            raise BitmapError("invalid_bitmap: JPEG is missing final EOI")
     else:
-        raise BitmapError("only PNG and JPEG uploads are supported")
-    if width * height > 20_000_000:
-        raise BitmapError("bitmap exceeds 20 megapixels")
-    return BitmapAsset(data, media_type, width, height, hashlib.sha256(data).hexdigest())
+        raise BitmapError("unsupported_media_type: only PNG and JPEG are supported")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as probe:
+                width, height = probe.size
+                if width > MAX_SIDE or height > MAX_SIDE or width * height > MAX_PIXELS:
+                    raise BitmapError("input_too_large: maximum side 12000 px and total 50 MP")
+                if probe.format != expected_format or getattr(probe, "n_frames", 1) != 1:
+                    raise BitmapError("unsupported_bitmap: format mismatch or animated image")
+                probe.verify()
+            if expected_format == "JPEG":
+                _verify_jpeg_pixels(data)
+            with Image.open(io.BytesIO(data)) as source:
+                source.load()
+                orientation = source.getexif().get(274, 1)
+                if orientation not in range(1, 9):
+                    raise BitmapError("invalid_bitmap: unsupported EXIF orientation")
+                transformed = ImageOps.exif_transpose(source)
+                icc = source.info.get("icc_profile")
+                if icc:
+                    transformed = ImageCms.profileToProfile(
+                        transformed, ImageCms.ImageCmsProfile(io.BytesIO(icc)),
+                        ImageCms.createProfile("sRGB"), outputMode="RGBA" if "A" in transformed.getbands() else "RGB",
+                    )
+                rgba = transformed.convert("RGBA")
+                white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                normalized = Image.alpha_composite(white, rgba).convert("RGB")
+                encoded = _png(normalized)
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError) as exc:
+        raise BitmapError("input_too_large: decompression bomb") from exc
+    except BitmapError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, ImageCms.PyCMSError) as exc:
+        raise BitmapError(f"invalid_bitmap: full pixel decode failed: {exc}") from exc
+    metadata = {
+        "decoder": "Pillow", "decoder_version": pillow_version,
+        "original_pixel_size": {"width": width, "height": height},
+        "pixel_size": {"width": normalized.width, "height": normalized.height},
+        "exif_orientation": orientation,
+        "source_to_normalized_transform": _orientation_transform(orientation, width, height),
+        "color_space": "sRGB", "color_profile": "embedded_converted" if icc else "untagged_assumed_srgb",
+        "alpha_background": [255, 255, 255], "normalized_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    return BitmapAsset(data, media_type, normalized.width, normalized.height, hashlib.sha256(data).hexdigest(), encoded, metadata)
+
+
+def _binary(asset: BitmapAsset) -> tuple[np.ndarray, np.ndarray]:
+    with Image.open(io.BytesIO(asset.normalized_png)) as image:
+        rgb = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+    return gray, binary
+
+
+def _segments(binary: np.ndarray, axis: str, minimum: int) -> list[dict[str, Any]]:
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (minimum, 1) if axis == "h" else (1, minimum))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(opened, 8)
+    result = []
+    for index in range(1, count):
+        x, y, width, height, area = (int(value) for value in stats[index])
+        length, thickness = (width, height) if axis == "h" else (height, width)
+        if length < minimum or thickness > max(8, min(binary.shape) * 0.08):
+            continue
+        start, stop = (x, x + width - 1) if axis == "h" else (y, y + height - 1)
+        coordinate = y + (height - 1) / 2 if axis == "h" else x + (width - 1) / 2
+        result.append({"axis": axis, "coordinate": coordinate, "start": float(start), "end": float(stop),
+                       "thickness": float(thickness), "evidence_bbox": [x, y, width, height],
+                       "strength": round(area / (width * height), 6)})
+    return sorted(result, key=lambda item: (item["coordinate"], item["start"]))
+
+
+def _group_lines(segments: list[dict[str, Any]], maximum_gap: int) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for segment in segments:
+        match = next((line for line in reversed(groups)
+                      if abs(line["coordinate"] - segment["coordinate"]) <= 1
+                      and segment["start"] <= line["end"] + maximum_gap
+                      and segment["end"] >= line["start"] - maximum_gap), None)
+        if match is None:
+            groups.append({**segment, "intervals": [[segment["start"], segment["end"]]], "gaps": []})
+            continue
+        match["start"] = min(match["start"], segment["start"])
+        match["end"] = max(match["end"], segment["end"])
+        match["intervals"].append([segment["start"], segment["end"]])
+        intervals = sorted(match["intervals"])
+        match["gaps"] = []
+        end = intervals[0][1]
+        for start, stop in intervals[1:]:
+            if start > end + 1:
+                match["gaps"].append([end + 1, start])
+            end = max(end, stop)
+        match["thickness"] = max(match["thickness"], segment["thickness"])
+    return groups
+
+
+def _pair_parallel(lines: list[dict[str, Any]], maximum_thickness: float) -> list[dict[str, Any]]:
+    """Treat paired outline strokes as one wall, retaining both pixel evidences."""
+    result, consumed = [], set()
+    for index, line in enumerate(lines):
+        if index in consumed:
+            continue
+        partner = None
+        for other_index in range(index + 1, len(lines)):
+            other = lines[other_index]
+            separation = other["coordinate"] - line["coordinate"]
+            overlap = min(line["end"], other["end"]) - max(line["start"], other["start"])
+            longest = max(line["end"] - line["start"], other["end"] - other["start"])
+            if other_index not in consumed and max(line["thickness"], other["thickness"]) < separation <= maximum_thickness and overlap >= longest * 0.9:
+                partner = (other_index, other)
+                break
+        if partner is None:
+            result.append(line)
+            continue
+        other_index, other = partner
+        consumed.add(other_index)
+        result.append({**line, "coordinate": (line["coordinate"] + other["coordinate"]) / 2,
+                       "start": min(line["start"], other["start"]), "end": max(line["end"], other["end"]),
+                       "thickness": other["coordinate"] - line["coordinate"] + (line["thickness"] + other["thickness"]) / 2,
+                       "paired_evidence": [line["evidence_bbox"], other["evidence_bbox"]],
+                       "gaps": [[max(a, c), min(b, d)] for a, b in line["gaps"] for c, d in other["gaps"] if min(b, d) > max(a, c)]})
+    return sorted(result, key=lambda item: (item["coordinate"], item["start"]))
+
+
+def _covers(line: dict[str, Any], start: float, end: float) -> bool:
+    tolerance = max(2, line["thickness"] / 2 + 1)
+    if line["start"] > start + tolerance or line["end"] < end - tolerance:
+        return False
+    missing = sum(max(0, min(b, end) - max(a, start)) for a, b in line["gaps"])
+    return missing <= 0.2 * (end - start)
+
+
+def _recognize(asset: BitmapAsset) -> dict[str, Any]:
+    gray, binary = _binary(asset)
+    minimum = max(13, int(min(asset.width, asset.height) * 0.12)) | 1
+    maximum_gap = max(4, int(min(asset.width, asset.height) * 0.16))
+    if float(np.mean(binary > 0)) > 0.65:
+        raise BitmapError("unsupported_bitmap: insufficient light room interior")
+    raw = _segments(binary, "h", minimum) + _segments(binary, "v", minimum)
+    hough = cv2.HoughLinesP(binary, 1, np.pi / 720, threshold=minimum,
+                            minLineLength=minimum * 2, maxLineGap=2)
+    if hough is not None:
+        for x1, y1, x2, y2 in hough[:, 0, :]:
+            angle = abs(math.degrees(math.atan2(int(y2) - int(y1), int(x2) - int(x1)))) % 90
+            if min(angle, 90 - angle) > 2:
+                covered_by_axis_band = any(
+                    (line["axis"] == "h" and max(abs(y1 - line["coordinate"]), abs(y2 - line["coordinate"])) <= line["thickness"] / 2 + 1
+                     and min(x1, x2) >= line["start"] - 2 and max(x1, x2) <= line["end"] + 2)
+                    or (line["axis"] == "v" and max(abs(x1 - line["coordinate"]), abs(x2 - line["coordinate"])) <= line["thickness"] / 2 + 1
+                        and min(y1, y2) >= line["start"] - 2 and max(y1, y2) <= line["end"] + 2)
+                    for line in raw
+                )
+                if not covered_by_axis_band:
+                    raise BitmapError("non_orthogonal_candidate: long diagonal line requires manual tracing")
+    lines = _pair_parallel(_group_lines([item for item in raw if item["axis"] == "h"], maximum_gap), minimum / 2)
+    lines += _pair_parallel(_group_lines([item for item in raw if item["axis"] == "v"], maximum_gap), minimum / 2)
+    if len(lines) > 128:
+        raise BitmapError("input_too_complex: more than 128 long wall candidates")
+    horizontal = [item for item in lines if item["axis"] == "h"]
+    vertical = [item for item in lines if item["axis"] == "v"]
+    rectangles = []
+    for index, top in enumerate(horizontal):
+        for bottom in horizontal[index + 1:]:
+            y1, y2 = top["coordinate"], bottom["coordinate"]
+            if y2 - y1 < minimum:
+                continue
+            sides = [line for line in vertical if _covers(line, y1, y2)]
+            for left_index, left in enumerate(sides):
+                for right in sides[left_index + 1:]:
+                    x1, x2 = left["coordinate"], right["coordinate"]
+                    if x2 - x1 < minimum or not _covers(top, x1, x2) or not _covers(bottom, x1, x2):
+                        continue
+                    rectangles.append({"rect": [x1, y1, x2 - x1, y2 - y1], "lines": [top, bottom, left, right]})
+    faces = []
+    for candidate in rectangles:
+        x, y, width, height = candidate["rect"]
+        subdivided = any(
+            (line["axis"] == "v" and x + 2 < line["coordinate"] < x + width - 2 and _covers(line, y, y + height))
+            or (line["axis"] == "h" and y + 2 < line["coordinate"] < y + height - 2 and _covers(line, x, x + width))
+            for line in lines
+        )
+        if not subdivided:
+            faces.append(candidate)
+    faces.sort(key=lambda item: (item["rect"][1], item["rect"][0]))
+    if not faces:
+        raise BitmapError("no_closed_rectangle: no supported closed orthogonal room was found")
+    for index, face in enumerate(faces):
+        x, y, width, height = face["rect"]
+        for other in faces[index + 1:]:
+            ox, oy, ow, oh = other["rect"]
+            if min(x + width, ox + ow) - max(x, ox) > 1 and min(y + height, oy + oh) - max(y, oy) > 1:
+                raise BitmapError("overlapping_room_candidates: manual tracing required")
+    used = {id(line) for face in faces for line in face["lines"]}
+    unused = [line for line in lines if id(line) not in used]
+    return {"faces": faces, "lines": lines, "unused": unused, "metadata": {
+        **asset.normalization, "algorithm_version": ALGORITHM_VERSION, "opencv_version": cv2.__version__,
+        "threshold": 180, "threshold_mode": "fixed_inverse", "denoise": "none", "contrast": "none",
+        "minimum_line_length_px": minimum, "maximum_gap_px": maximum_gap,
+        "mean_luma": round(float(gray.mean()), 6), "dark_ratio": round(float(np.mean(binary > 0)), 6),
+        "line_candidates": raw,
+    }}
 
 
 def preprocess_bitmap(asset: BitmapAsset) -> dict[str, Any]:
-    """Extract deterministic grayscale statistics and dark-line candidates."""
-    if asset.media_type == "image/png":
-        width, height, pixels = _read_png(asset.data)
-        mean = sum(pixels) / len(pixels)
-        threshold = min(220.0, max(32.0, mean * 0.72))
-        dark = [value < threshold for value in pixels]
-        row_scores = [sum(dark[row * width : (row + 1) * width]) / width for row in range(height)]
-        col_scores = [sum(dark[col::width]) / height for col in range(width)]
-        rows = [index for index, score in enumerate(row_scores) if score >= 0.55]
-        cols = [index for index, score in enumerate(col_scores) if score >= 0.55]
-        return {
-            "decoder": "builtin-png-8bit",
-            "mean_luma": round(mean, 6),
-            "dark_threshold": round(threshold, 6),
-            "dark_ratio": round(sum(dark) / len(dark), 6),
-            "line_candidates": {
-                "horizontal_rows_px": rows[:256],
-                "vertical_columns_px": cols[:256],
-            },
-            "provenance": "deterministic_pixel_scan",
-            "confidence": 0.35,
-        }
-    return {
-        "decoder": "jpeg-header-only",
-        "line_candidates": {"horizontal_rows_px": [], "vertical_columns_px": []},
-        "provenance": "jpeg_dimensions_only",
-        "confidence": 0.1,
-    }
+    return _recognize(asset)["metadata"]
 
 
-def ingest_bitmap(
-    data: bytes,
-    *,
-    filename: str = "upload",
-    model_id: str | None = None,
-    revision: int = 1,
-    mm_per_pixel: float = 10.0,
-) -> dict[str, Any]:
-    """Create a reviewable SpatialModel draft from a bitmap upload.
+def _ocr_evidence(asset: BitmapAsset) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    runtime = _ocr_runtime()
+    executable = shutil.which("tesseract")
+    if executable is None:
+        return {**runtime, "dimensions": []}, [{"code": "ocr_unavailable", "message": "Tesseract is not installed; dimensions require manual review"}]
+    try:
+        result = subprocess.run(
+            [executable, "stdin", "stdout", "--psm", "11", "-l", "eng", "tsv"],
+            input=asset.normalized_png, capture_output=True,
+            timeout=10, check=False, env={**os.environ, "OMP_THREAD_LIMIT": "1", "LC_ALL": "C"},
+        )
+        if result.returncode:
+            return {**runtime, "dimensions": []}, [{"code": "ocr_failed", "message": "Tesseract could not produce dimension evidence"}]
+        entries = []
+        for row in csv.DictReader(io.StringIO(result.stdout.decode("utf-8")), delimiter="\t"):
+            value = row.get("text", "").strip()
+            if not re.fullmatch(r"\d{2,6}(?:\.\d+)?(?:mm|cm|m)?", value, re.IGNORECASE):
+                continue
+            entries.append({"text": value, "evidence_bbox": [int(row[key]) for key in ("left", "top", "width", "height")],
+                            "confidence": round(max(0, min(100, float(row["conf"]))) / 100, 6),
+                            "provenance": "ocr_dimension_unassociated", "needs_review": True, "association": None})
+        entries.sort(key=lambda item: (item["evidence_bbox"][1], item["evidence_bbox"][0], item["text"]))
+        notes = [{"code": "dimension_ocr_unassociated", "message": "OCR text is evidence only; no dimension endpoints or scale were inferred"}] if entries else []
+        return {**runtime, "language": "eng", "psm": 11, "dimensions": entries}, notes
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError, KeyError):
+        return {**runtime, "dimensions": []}, [{"code": "ocr_failed", "message": "Dimension OCR failed or exceeded its 10 second budget"}]
 
-    The image bounds are a candidate room, not a measurement.  ``mm_per_pixel``
-    is therefore explicitly recorded as an inferred calibration and the output
-    remains ``draft`` until a human supplies/validates dimensions and topology.
-    """
-    if isinstance(mm_per_pixel, bool) or not isinstance(mm_per_pixel, (int, float)) or not math.isfinite(float(mm_per_pixel)) or mm_per_pixel <= 0:
-        raise BitmapError("mm_per_pixel must be a finite number > 0")
+
+def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None = None,
+                  revision: int = 1, mm_per_pixel: float | None = None) -> dict[str, Any]:
+    scale = _scale(mm_per_pixel)
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
-        raise BitmapError("revision must be an integer >= 1")
+        raise BitmapError("invalid_revision: revision must be an integer >= 1")
     asset = load_bitmap(data, filename)
-    preprocessing = preprocess_bitmap(asset)
-    width_mm = round(asset.width * float(mm_per_pixel), 6)
-    height_mm = round(asset.height * float(mm_per_pixel), 6)
-    min_dimension = min(width_mm, height_mm)
-    # Keep the provisional wall geometrically bounded even for tiny test images.
-    wall_thickness = min(200.0, max(1.0, min_dimension * 0.02), min_dimension * 0.45)
-    wall_top = 2800.0
-    prefix = model_id or f"bitmap-{asset.sha256[:12]}"
-    source_provenance = "user_upload"
-    model: dict[str, Any] = {
-        "schema_version": "2.0",
-        "profile": "orthogonal_v1",
-        "model_id": prefix,
-        "revision": revision,
-        "status": "draft",
-        "units": {"length": "mm", "angle": "deg"},
-        "coordinates": {"origin": "project_south_west_corner", "handedness": "right"},
-        "source": {
-            "asset_id": filename or f"upload-{asset.sha256[:12]}",
-            "kind": "bitmap",
-            "sha256": asset.sha256,
-            "provenance": source_provenance,
-        },
-        "confidence": 0.2,
-        "rooms": [{
-            "id": "room-candidate-1", "name": "待校核房间", "kind": "unknown",
-            "rect": [0.0, 0.0, width_mm, height_mm],
-            "boundary_wall_ids": ["wall-n", "wall-s", "wall-w", "wall-e"],
-            "provenance": "image_bounds_candidate", "confidence": 0.2,
-        }],
-        "walls": [
-            {"id": "wall-n", "axis": "h", "x": 0.0, "y": 0.0, "length": width_mm, "thickness": wall_thickness, "bottom_z": 0.0, "top_z": wall_top, "provenance": "image_bounds_candidate", "confidence": 0.2},
-            {"id": "wall-s", "axis": "h", "x": 0.0, "y": height_mm, "length": width_mm, "thickness": wall_thickness, "bottom_z": 0.0, "top_z": wall_top, "provenance": "image_bounds_candidate", "confidence": 0.2},
-            {"id": "wall-w", "axis": "v", "x": 0.0, "y": 0.0, "length": height_mm, "thickness": wall_thickness, "bottom_z": 0.0, "top_z": wall_top, "provenance": "image_bounds_candidate", "confidence": 0.2},
-            {"id": "wall-e", "axis": "v", "x": width_mm, "y": 0.0, "length": height_mm, "thickness": wall_thickness, "bottom_z": 0.0, "top_z": wall_top, "provenance": "image_bounds_candidate", "confidence": 0.2},
-        ],
-        "openings": [],
-        "furniture_instances": [],
-        "cameras": [],
-        "materials": [],
-        "ingest": {
-            "filename": filename,
-            "media_type": asset.media_type,
-            "pixel_size": {"width": asset.width, "height": asset.height},
-            "mm_per_pixel": float(mm_per_pixel),
-            "calibration": {"value": float(mm_per_pixel), "provenance": "caller_default_or_input", "confidence": 0.1},
-            "preprocessing": preprocessing,
-            "candidates": [{"id": "room-candidate-1", "kind": "room_bounds", "provenance": "image_bounds_candidate", "confidence": 0.2}],
-            "requires_human_review": True,
-        },
+    if max(asset.width, asset.height) * scale > 1_000_000:
+        raise BitmapError("invalid_scale: resulting dimensions exceed 1000000 mm")
+    recognition = _recognize(asset)
+    job_id = ingest_key(data, scale)
+    source_ref = {"source_asset_sha256": asset.sha256, "provenance": "opencv_line_candidate",
+                  "confidence": 0.8, "needs_review": True, "algorithm_version": ALGORITHM_VERSION}
+    candidates, walls, rooms, openings = [], [], [], []
+    line_ids: dict[int, str] = {}
+
+    def length(value: float) -> float:
+        return round(value * scale, 6)
+
+    def candidate(object_id: str, kind: str, pixels: dict[str, Any], geometry: dict[str, Any], bbox: list[float]) -> None:
+        candidates.append({"id": object_id, "kind": kind, "pixel_geometry": pixels, "geometry_mm": geometry,
+                           "evidence_bbox": bbox, **source_ref})
+
+    for face in recognition["faces"]:
+        boundaries = []
+        for line in face["lines"]:
+            identity = id(line)
+            if identity not in line_ids:
+                wall_id = f"wall-candidate-{len(walls) + 1}"
+                line_ids[identity] = wall_id
+                axis, coordinate, start, end = (line[key] for key in ("axis", "coordinate", "start", "end"))
+                x, y = (start, coordinate) if axis == "h" else (coordinate, start)
+                thickness = line["thickness"]
+                wall = {"id": wall_id, "axis": axis, "x": length(x), "y": length(y), "length": length(end - start),
+                        "thickness": length(thickness), "bottom_z": 0.0, "top_z": 2800.0, **source_ref,
+                        "dimension_provenance": {"source": "user_scale", "pixel_value": end - start, "world_value_mm": length(end - start),
+                                                 "source_asset_sha256": asset.sha256, "confidence": 0.8, "needs_review": True},
+                        "height_provenance": {"source": "default_unmeasured", "value_mm": 2800, "confidence": 0, "needs_review": True}}
+                walls.append(wall)
+                bbox = [x, y - thickness / 2, end - start, thickness] if axis == "h" else [x - thickness / 2, y, thickness, end - start]
+                candidate(wall_id, "wall", {"axis": axis, "x": x, "y": y, "length": end - start, "thickness": thickness},
+                          {key: wall[key] for key in ("axis", "x", "y", "length", "thickness")}, bbox)
+                for gap_start, gap_end in line["gaps"]:
+                    if gap_end - gap_start <= max(2, thickness):
+                        continue
+                    opening_id = f"opening-candidate-{len(openings) + 1}"
+                    opening = {"id": opening_id, "host_wall_id": wall_id, "kind": "passage", "offset": length(gap_start - start),
+                               "width": length(gap_end - gap_start), "height": 2100.0, "bottom_z": 0.0, **source_ref,
+                               "confidence": 0.5, "provenance": "wall_gap_unclassified",
+                               "height_provenance": {"source": "default_unmeasured", "value_mm": 2100, "confidence": 0, "needs_review": True}}
+                    openings.append(opening)
+                    obox = [gap_start, coordinate - thickness / 2, gap_end - gap_start, thickness] if axis == "h" else [coordinate - thickness / 2, gap_start, thickness, gap_end - gap_start]
+                    candidate(opening_id, "opening", {"host_wall_id": wall_id, "offset": gap_start - start, "width": gap_end - gap_start},
+                              {key: opening[key] for key in ("host_wall_id", "offset", "width", "height")}, obox)
+                    candidates[-1].update(confidence=0.5, provenance="wall_gap_unclassified")
+            boundaries.append(line_ids[identity])
+        room_id = f"room-candidate-{len(rooms) + 1}"
+        pixel_rect = face["rect"]
+        rect = [length(value) for value in pixel_rect]
+        room = {"id": room_id, "name": f"Room {len(rooms) + 1}", "kind": "unknown", "rect": rect,
+                "boundary_wall_ids": boundaries, **source_ref,
+                "dimension_provenance": {"source": "user_scale", "pixel_rect": pixel_rect, "world_rect_mm": rect,
+                                         "source_asset_sha256": asset.sha256, "confidence": 0.8, "needs_review": True}}
+        rooms.append(room)
+        candidate(room_id, "room", {"rect": pixel_rect}, {"rect": rect}, pixel_rect)
+    for index, room in enumerate(rooms):
+        for other in rooms[index + 1:]:
+            x, y, width, height = room["rect"]
+            ox, oy, ow, oh = other["rect"]
+            shared = sorted(wall["id"] for wall in walls
+                            if wall["id"] in room["boundary_wall_ids"] and wall["id"] in other["boundary_wall_ids"]
+                            and ((wall["axis"] == "v" and (abs(x + width - ox) < 1e-6 or abs(ox + ow - x) < 1e-6)
+                                  and abs(wall["x"] - max(x, ox)) < 1e-6)
+                                 or (wall["axis"] == "h" and (abs(y + height - oy) < 1e-6 or abs(oy + oh - y) < 1e-6)
+                                     and abs(wall["y"] - max(y, oy)) < 1e-6)))
+            if shared and any(item["host_wall_id"] in shared for item in openings):
+                candidates.append({"id": f"merge-candidate-{room['id']}-{other['id']}", "kind": "merge_group",
+                                   "room_ids": [room["id"], other["id"]], "shared_wall_ids": shared,
+                                   "pixel_geometry": {}, "geometry_mm": {}, "evidence_bbox": [],
+                                   **source_ref, "confidence": 0.5, "provenance": "shared_wall_gap"})
+    ocr, notes = _ocr_evidence(asset)
+    notes.append({"code": "unmeasured_heights", "message": "Wall and opening heights are defaults and must be reviewed"})
+    if openings:
+        notes.append({"code": "unclassified_wall_gaps", "message": "Wall gaps are passage candidates, not classified doors or windows"})
+    if recognition["unused"]:
+        notes.append({"code": "unassigned_line_candidates", "message": "Some long lines do not bound a closed room", "count": len(recognition["unused"])})
+    model = {
+        "schema_version": "2.0", "profile": "orthogonal_v1", "model_id": model_id or f"bitmap-{job_id[:24]}",
+        "revision": revision, "status": "draft", "units": {"length": "mm", "angle": "deg"},
+        "coordinates": {"origin": "normalized_bitmap_top_left", "handedness": "right"},
+        "source": {"asset_id": f"sha256:{asset.sha256}", "kind": "bitmap", "sha256": asset.sha256, "provenance": "user_upload"},
+        "confidence": 0.8, "rooms": rooms, "walls": walls, "openings": openings,
+        "furniture_instances": [], "cameras": [], "materials": [],
+        "ingest": {"ingest_id": job_id, "algorithm_version": ALGORITHM_VERSION, "parameters_hash": job_id,
+                   "media_type": asset.media_type, "source_sha256": asset.sha256,
+                   "pixel_size": {"width": asset.width, "height": asset.height}, "mm_per_pixel": scale,
+                   "scale_status": "user_supplied", "calibration": {"value": scale, "provenance": "user_scale", "confidence": 1.0, "needs_review": True},
+                   "preprocessing": recognition["metadata"], "candidates": candidates,
+                   "evidence": {"ocr": ocr, "unassigned_lines": recognition["unused"]},
+                   "warnings": notes, "hard_blockers": [], "requires_human_review": True},
     }
-    validate_model(model)
+    try:
+        validate_model(model)
+    except ValueError as exc:
+        raise BitmapError(f"invalid_candidate_geometry: {exc}") from exc
     return model
-
-
-def canonical_json(model: dict[str, Any]) -> str:
-    """Stable JSON helper for persisted ingest artifacts and tests."""
-    return json.dumps(model, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

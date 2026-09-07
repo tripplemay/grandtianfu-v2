@@ -217,7 +217,64 @@ class RevisionStore:
             raise MissingRevision("Revision not found")
         return self._envelope(row)
 
-    def append(self, model_id: str, model: Any, expected_revision: int, expected_hash: str, note: str, action: str) -> dict[str, Any]:
+    def import_draft(self, model: dict[str, Any]) -> dict[str, Any]:
+        checked_model(model)
+        if model["status"] != "draft" or model["revision"] != 1 or model["source"]["kind"] != "bitmap":
+            raise InvalidModel("ingest must create an initial bitmap draft")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT * FROM revisions WHERE model_id = ? AND revision = 1", (model["model_id"],)).fetchone()
+                if row is not None:
+                    if self._envelope(row)["hash"] != canonical_hash(model):
+                        raise StorageIntegrityError("Ingest identity already has a different initial model")
+                    result = self._latest(db, model["model_id"])
+                else:
+                    result = self._insert(db, model, "Bitmap recognition; awaiting human review")
+                db.commit()
+                return result
+            except Exception:
+                db.rollback()
+                raise
+
+    def confirm_ingest(self, model_id: str, ingest_id: str, *, expected_revision: int,
+                       expected_hash: str, reviewed_object_ids: Any, checks: Any,
+                       reviewer: Any) -> dict[str, Any]:
+        current = self.get(model_id)
+        model = current["model"]
+        if current["hash"] != expected_hash or model["revision"] != expected_revision:
+            raise RevisionConflict(current)
+        ingest = model.get("ingest", {})
+        if model["source"]["kind"] != "bitmap" or ingest.get("ingest_id") != ingest_id:
+            raise InvalidModel("model is not associated with this ingest")
+        if model["status"] != "draft":
+            raise InvalidModel("only a draft can be reviewed")
+        scale = ingest.get("mm_per_pixel")
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+            raise InvalidModel("a verified user scale is required")
+        if ingest.get("hard_blockers") or ingest.get("blockers"):
+            raise InvalidModel("unresolved recognition blockers require corrected input")
+        required_checks = {"scale", "geometry", "openings", "heights"}
+        if not isinstance(checks, dict) or set(checks) != required_checks or any(value is not True for value in checks.values()):
+            raise InvalidModel("all scale, geometry, openings and heights checks must be acknowledged")
+        ids = {item["id"] for key in ("rooms", "walls", "openings") for item in model[key]}
+        if (not isinstance(reviewed_object_ids, list)
+                or any(not isinstance(value, str) for value in reviewed_object_ids)
+                or len(reviewed_object_ids) != len(ids) or set(reviewed_object_ids) != ids):
+            raise InvalidModel("every current room, wall and opening must be reviewed exactly once")
+        if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 120:
+            raise InvalidModel("reviewer must be a non-empty local display name of at most 120 characters")
+        review = {
+            "ingest_id": ingest_id, "source_sha256": model["source"]["sha256"],
+            "draft_revision": model["revision"], "draft_hash": current["hash"],
+            "reviewed_object_ids": sorted(ids), "checks": checks,
+            "reviewer": reviewer.strip(), "identity_kind": "self_reported_local",
+            "reviewed_at": datetime.now(UTC).isoformat(timespec="microseconds"),
+        }
+        return self.append(model_id, model, expected_revision, expected_hash,
+                           "Human reviewed bitmap geometry and scale", "confirm", review=review)
+
+    def append(self, model_id: str, model: Any, expected_revision: int, expected_hash: str, note: str, action: str, *, review: dict[str, Any] | None = None) -> dict[str, Any]:
         checked_model(model, model_id)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise InvalidModel("expected_revision must be a positive integer")
@@ -233,6 +290,11 @@ class RevisionStore:
                 current = self._latest(db, model_id)
                 if expected_revision != current["model"]["revision"] or expected_hash != current["hash"]:
                     raise RevisionConflict(current)
+                if current["model"]["source"]["kind"] == "bitmap":
+                    if model["source"] != current["model"]["source"] or model.get("ingest") != current["model"].get("ingest"):
+                        raise InvalidModel("bitmap source and calibration evidence are immutable; reimport to recalibrate")
+                    if action == "confirm" and review is None:
+                        raise InvalidModel("bitmap confirmation requires the ingest review endpoint")
                 if model["revision"] > expected_revision:
                     raise InvalidModel("model.revision cannot refer to a future revision")
                 source = db.execute("SELECT * FROM revisions WHERE model_id = ? AND revision = ?", (model_id, model["revision"])).fetchone()
@@ -241,6 +303,20 @@ class RevisionStore:
                 self._envelope(source)
                 # Historical restore uses old content with current CAS, never rewinds history.
                 candidate = {**model, "revision": expected_revision + 1, "status": "confirmed" if action == "confirm" else "draft"}
+                candidate.pop("review", None)
+                if review is not None:
+                    candidate["review"] = review
+                if current["model"]["source"]["kind"] == "bitmap":
+                    # Recognition confidence stays historical evidence; the
+                    # human review state belongs to this specific revision.
+                    for collection in ("rooms", "walls", "openings"):
+                        candidate[collection] = []
+                        for item in model[collection]:
+                            reviewed_item = {**item, "needs_review": review is None}
+                            for evidence in ("dimension_provenance", "height_provenance"):
+                                if isinstance(item.get(evidence), dict):
+                                    reviewed_item[evidence] = {**item[evidence], "needs_review": review is None}
+                            candidate[collection].append(reviewed_item)
                 checked_model(candidate, model_id)
                 result = self._insert(db, candidate, note)
                 db.commit()

@@ -1,5 +1,12 @@
 """Deterministic bitmap ingest primitives for SpatialModel drafts."""
 
-from .bitmap import BitmapError, ingest_bitmap, preprocess_bitmap
+from .bitmap import (
+    ALGORITHM_VERSION,
+    BitmapError,
+    ingest_bitmap,
+    ingest_key,
+    load_bitmap,
+    preprocess_bitmap,
+)
 
-__all__ = ["BitmapError", "ingest_bitmap", "preprocess_bitmap"]
+__all__ = ["ALGORITHM_VERSION", "BitmapError", "ingest_bitmap", "ingest_key", "load_bitmap", "preprocess_bitmap"]
