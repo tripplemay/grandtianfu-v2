@@ -11,10 +11,17 @@ from urllib.parse import unquote
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from ingest import BitmapError
+from spatial_core import canonical_hash
 from starlette.concurrency import run_in_threadpool
 from starlette.staticfiles import StaticFiles
 
-from .ingest import IngestUnavailable, ingest_bitmap_worker, ingest_response, read_ingest
+from .ingest import (
+    IngestUnavailable,
+    crop_ingest_worker,
+    ingest_bitmap_worker,
+    ingest_response,
+    read_ingest,
+)
 from .rendering import RenderUnavailable, render_revision
 from .revisions import (
     InvalidModel,
@@ -163,6 +170,16 @@ def create_app(
     def get_ingest(ingest_id: str):
         result = verified_ingest(ingest_id)
         envelope = store.import_draft(result["model"])
+        return ingest_response(result, envelope)
+
+    @app.post("/api/ingests/{ingest_id}/crop", status_code=201)
+    async def crop_ingest(ingest_id: str, request: Request):
+        body = await _body(request, {"bbox", "expected_source_sha256"})
+        parent = await run_in_threadpool(verified_ingest, ingest_id)
+        if body["expected_source_sha256"] != parent["model"]["source"]["sha256"]:
+            raise RevisionConflict({"model": parent["model"], "hash": canonical_hash(parent["model"])})
+        result = await run_in_threadpool(crop_ingest_worker, parent, body["bbox"], intake_root())
+        envelope = await run_in_threadpool(store.import_draft, result["model"])
         return ingest_response(result, envelope)
 
     @app.get("/api/ingests/{ingest_id}/artifacts/{channel}")

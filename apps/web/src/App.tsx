@@ -324,7 +324,9 @@ export default function App() {
   useEffect(() => {
     const id = model?.ingest?.ingest_id;
     setIngestResult(null);
-    setPlanView("plan");
+    // Keep source comparison open while moving from a parent ingest to a
+    // derived ROI draft; normal model loads still default to the plan view.
+    setPlanView((current) => (current === "source" ? current : "plan"));
     if (!id) return;
     const controller = new AbortController();
     void request<IngestResult>(`/api/ingests/${encodeURIComponent(id)}`, {
@@ -550,6 +552,42 @@ export default function App() {
     install(result.envelope);
     setNotice("户型图已导入 · 待人工校核");
     setMobilePanel("plan");
+  }
+
+  async function cropIngest(roi: [number, number, number, number]) {
+    if (!model?.ingest) throw new Error("当前模型没有位图导入记录");
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request<IngestResult>(
+        `/api/ingests/${encodeURIComponent(model.ingest.ingest_id)}/crop`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_source_sha256: model.source.sha256,
+            bbox: roi,
+          }),
+        },
+      );
+      const [summaries, history] = await Promise.all([
+        request<Summary[]>("/api/models"),
+        request<Revision[]>(
+          `/api/models/${encodeURIComponent(result.envelope.model.model_id)}/revisions`,
+        ),
+      ]);
+      setModels(summaries);
+      setRevisions(history);
+      setLatest(result.envelope);
+      setIngestResult(result);
+      install(result.envelope);
+      setPlanView("source");
+      setMobilePanel("plan");
+      setNotice("已按原图候选生成新草稿 · 原始证据保留");
+      return result;
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function confirmIngest(
@@ -1070,7 +1108,7 @@ export default function App() {
             </div>
             {planView === "source" && model.ingest ? (
               ingestResult ? (
-                <IngestSource model={model} result={ingestResult} />
+                <IngestSource model={model} result={ingestResult} onCrop={cropIngest} />
               ) : (
                 <div className="loading-state">
                   <LoaderCircle size={24} className="spin" />

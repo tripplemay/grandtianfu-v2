@@ -7,7 +7,59 @@ export type IngestResult = {
   manifest: Record<string, unknown>;
   source_url: string;
   preprocessed_url?: string;
+  parent_source_url?: string | null;
+  parent_preprocessed_url?: string | null;
 };
+
+export type RoiCandidate = {
+  id: string;
+  rank?: number;
+  evidence_bbox: [number, number, number, number];
+  confidence?: number;
+  needs_review?: boolean;
+  selection?: string;
+  [key: string]: unknown;
+};
+
+/** Read ROI evidence without treating it as SpatialModel geometry. */
+export function roiCandidates(model: SpatialModel): RoiCandidate[] {
+  const ingest = model.ingest;
+  const sources = [
+    ingest && typeof ingest.preprocessing === "object"
+      ? (ingest.preprocessing as { roi_candidates?: unknown }).roi_candidates
+      : undefined,
+    ingest && typeof ingest.evidence === "object"
+      ? (ingest.evidence as { roi_candidates?: unknown }).roi_candidates
+      : undefined,
+  ];
+  const seen = new Set<string>();
+  const output: RoiCandidate[] = [];
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue;
+    for (const value of source) {
+      if (!value || typeof value !== "object") continue;
+      const candidate = value as Partial<RoiCandidate>;
+      const bbox = candidate.evidence_bbox;
+      if (
+        typeof candidate.id !== "string" ||
+        !Array.isArray(bbox) ||
+        bbox.length !== 4 ||
+        bbox.some((part) => typeof part !== "number" || !Number.isFinite(part)) ||
+        bbox[2] <= 0 ||
+        bbox[3] <= 0 ||
+        seen.has(candidate.id)
+      )
+        continue;
+      seen.add(candidate.id);
+      output.push({
+        ...candidate,
+        id: candidate.id,
+        evidence_bbox: bbox as RoiCandidate["evidence_bbox"],
+      });
+    }
+  }
+  return output.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+}
 
 export const reviewChecks = {
   scale: "比例与尺寸已核对",

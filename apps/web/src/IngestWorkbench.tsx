@@ -14,6 +14,8 @@ import {
   reviewObjects,
   validScale,
   type IngestResult,
+  roiCandidates,
+  type RoiCandidate,
   type ReviewCheck,
 } from "./ingestion";
 import { openingRect, wallRect, type Camera, type SpatialModel } from "./model";
@@ -190,15 +192,59 @@ export function ImportDialog({
 export function IngestSource({
   model,
   result,
+  onCrop,
 }: {
   model: SpatialModel;
   result: IngestResult;
+  onCrop: (roi: RoiCandidate["evidence_bbox"]) => Promise<IngestResult>;
 }) {
   const [mode, setMode] = useState("overlay");
   const [dimensions, setDimensions] = useState({ width: 1, height: 1 });
   const [broken, setBroken] = useState(false);
+  const [selectedRoi, setSelectedRoi] = useState<string | null>(null);
+  const [cropBusy, setCropBusy] = useState(false);
+  const [cropError, setCropError] = useState("");
   const scale = model.ingest?.mm_per_pixel ?? 0;
-  const src = mode === "source" ? result.source_url : result.preprocessed_url;
+  // Overlay and source mode must remain on the immutable parent bitmap. The
+  // normalized image is the only crop-local artifact.
+  const src = mode === "source"
+    ? (result.parent_source_url ?? result.source_url)
+    : mode === "normalized"
+      ? result.preprocessed_url
+      : (result.parent_preprocessed_url ?? result.preprocessed_url);
+  const candidates = roiCandidates(model);
+  const selected = candidates.find((candidate) => candidate.id === selectedRoi);
+  const parentIngestId =
+    typeof model.ingest?.parent_ingest_id === "string"
+      ? model.ingest.parent_ingest_id
+      : null;
+  const cropRoi: [number, number, number, number] | null = (() => {
+    const value =
+      model.ingest && typeof model.ingest.roi === "object" && model.ingest.roi
+        ? (model.ingest.roi as { bbox?: unknown }).bbox
+        : null;
+    return Array.isArray(value) && value.length === 4 && value.every(
+      (item): item is number => typeof item === "number" && Number.isFinite(item),
+    )
+      ? [value[0], value[1], value[2], value[3]]
+      : null;
+  })();
+  useEffect(() => {
+    setSelectedRoi(null);
+    setCropError("");
+  }, [model.ingest?.ingest_id]);
+  async function cropSelected() {
+    if (!selected || cropBusy) return;
+    setCropBusy(true);
+    setCropError("");
+    try {
+      await onCrop(selected.evidence_bbox);
+    } catch (err) {
+      setCropError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCropBusy(false);
+    }
+  }
   return (
     <div className="ingest-source" data-testid="ingest-source">
       <div className="source-toolbar" role="group" aria-label="源图视图">
@@ -222,6 +268,92 @@ export function IngestSource({
         ))}
         <span className="muted">{scale} mm/px</span>
       </div>
+      <section className="roi-review" aria-label="人工选择户型区域">
+        {parentIngestId && (
+          <p className="workflow-status" data-testid="roi-derived-draft">
+            这是从原始 ingest <code>{parentIngestId.slice(0, 12)}</code> 生成的新草稿；原图证据仍由原始 hash 追溯。
+            {cropRoi && (
+              <> 裁剪原图坐标：[{cropRoi.map((value) => Math.round(Number(value))).join(", ")}] px。</>
+            )}
+          </p>
+        )}
+        <div className="roi-review-heading">
+          <div>
+            <strong>户型区域候选</strong>
+            <p className="muted">
+              候选只是原图证据，不是房间事实。请选择一个区域后重新识别。
+            </p>
+          </div>
+          <span className="muted" data-testid="roi-count">
+            {candidates.length} 个候选
+          </span>
+        </div>
+        {candidates.length ? (
+          <div className="roi-candidate-list" role="listbox" aria-label="户型区域候选">
+            {candidates.map((candidate) => {
+              const [x, y, width, height] = candidate.evidence_bbox;
+              const active = candidate.id === selectedRoi;
+              return (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  data-testid={`roi-candidate-${candidate.id}`}
+                  className={`roi-candidate ${active ? "selected" : ""}`}
+                  key={candidate.id}
+                  disabled={cropBusy}
+                  onClick={() => {
+                    setSelectedRoi(candidate.id);
+                    setCropError("");
+                  }}
+                >
+                  <span>
+                    候选 {candidate.rank ?? candidate.id}
+                    {candidate.confidence !== undefined
+                      ? ` · ${Math.round(candidate.confidence * 100)}%`
+                      : ""}
+                  </span>
+                  <small>
+                    原图坐标 x={Math.round(x)}, y={Math.round(y)}, w={Math.round(width)}, h={Math.round(height)} px
+                  </small>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="muted" data-testid="roi-empty">当前没有可安全选择的候选区域。</p>
+        )}
+        <div className="roi-review-actions">
+          <button
+            type="button"
+            className="button primary"
+            data-testid="roi-crop-submit"
+            disabled={!selected || cropBusy}
+            onClick={() => void cropSelected()}
+          >
+            {cropBusy ? <LoaderCircle size={16} className="spin" /> : <FileImage size={16} />}
+            {cropBusy ? "裁剪并重新识别中" : "裁剪并重新识别"}
+          </button>
+          <span className="muted">
+            {selected ? "将生成新的草稿版本，原图证据保留" : "未选择候选，审核仍不可用"}
+          </span>
+        </div>
+        {cropBusy && (
+          <p className="workflow-status" role="status" data-testid="roi-crop-status">
+            正在按原图坐标裁剪，等待 CPU worker 生成新的 ingest 草稿……
+          </p>
+        )}
+        {cropError && (
+          <p className="workflow-error" role="alert" data-testid="roi-crop-error">
+            裁剪识别失败：{cropError}
+          </p>
+        )}
+        {selected && !cropBusy && !cropError && (
+          <p className="muted" data-testid="roi-selected-status">
+            已选择候选 {selected.rank ?? selected.id}；坐标将原样提交，原图 hash 必须匹配。
+          </p>
+        )}
+      </section>
       <div className="source-image-scroll">
         {src && !broken ? (
           <div
@@ -232,7 +364,7 @@ export function IngestSource({
           >
             <img
               src={src}
-              alt={mode === "source" ? "原始户型位图" : "规范化户型位图"}
+              alt={mode === "normalized" ? "规范化户型位图" : "原始户型位图"}
               onLoad={(event) =>
                 setDimensions({
                   width: event.currentTarget.naturalWidth,
@@ -282,6 +414,24 @@ export function IngestSource({
                       strokeWidth={scale * 2}
                     />
                   ) : null;
+                })}
+                {candidates.map((candidate) => {
+                  const [x, y, width, height] = candidate.evidence_bbox;
+                  const active = candidate.id === selectedRoi;
+                  return (
+                    <rect
+                      key={`roi-${candidate.id}`}
+                      data-testid={`roi-overlay-${candidate.id}`}
+                      x={x * scale}
+                      y={y * scale}
+                      width={width * scale}
+                      height={height * scale}
+                      fill={active ? "#ef9f2d24" : "transparent"}
+                      stroke={active ? "#c06a12" : "#c08b3e"}
+                      strokeWidth={Math.max(scale, 2)}
+                      strokeDasharray={`${Math.max(scale * 3, 8)} ${Math.max(scale * 2, 5)}`}
+                    />
+                  );
                 })}
               </svg>
             )}

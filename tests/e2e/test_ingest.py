@@ -104,7 +104,9 @@ def test_import_overlay_review_and_explicit_camera(ingest_page, viewport):
     overlay = page.get_by_test_id("candidate-overlay")
     expect(overlay).to_be_visible()
     assert overlay.locator("rect").count() >= len(model["walls"]) + len(model["rooms"])
-    image = page.get_by_alt_text("规范化户型位图")
+    # Overlay deliberately uses the immutable source bitmap so pixel evidence
+    # remains in parent coordinates; only the normalized tab uses preprocessed.
+    image = page.get_by_alt_text("原始户型位图")
     expect(image).to_be_visible()
     expect(image).to_have_js_property("complete", True)
     expect(image).to_have_js_property("naturalWidth", 400)
@@ -196,3 +198,54 @@ def test_opening_candidate_can_be_classified_and_saved(ingest_page):
     assert latest["openings"][0]["kind"] == "door"
     assert latest["openings"][0]["offset"] == opening["offset"]
     assert latest["ingest"]["ingest_id"] == result["ingest_id"]
+
+
+def test_roi_candidate_selection_preserves_review_gate_and_surfaces_crop_failure(ingest_page):
+    page = ingest_page
+    upload(page)
+    page.get_by_test_id("source-view").click()
+    expect(page.get_by_test_id("roi-count")).to_have_text("1 个候选")
+    candidate = page.get_by_test_id("roi-candidate-roi-candidate-1")
+    expect(candidate).to_be_visible()
+    expect(page.get_by_test_id("roi-crop-submit")).to_be_disabled()
+    page.get_by_role("button", name="确认版本", exact=True).click()
+    expect(page.get_by_test_id("review-submit")).to_be_disabled()
+    page.get_by_role("dialog", name="人工校核").get_by_role("button", name="取消", exact=True).click()
+
+    seen = {}
+
+    def reject_crop(route):
+        seen["method"] = route.request.method
+        seen["body"] = route.request.post_data_json
+        route.fulfill(status=422, content_type="application/json", body='{"detail":"ROI recognition rejected"}')
+
+    page.route("**/api/ingests/*/crop", reject_crop)
+    candidate.click()
+    expect(page.get_by_test_id("roi-selected-status")).to_be_visible()
+    expect(page.get_by_test_id("roi-crop-submit")).to_be_enabled()
+    page.get_by_test_id("roi-crop-submit").click()
+    expect(page.get_by_test_id("roi-crop-error")).to_contain_text("ROI recognition rejected")
+    assert seen["method"] == "POST"
+    assert seen["body"]["bbox"] == [36, 26, 329, 249]
+    assert isinstance(seen["body"]["expected_source_sha256"], str)
+    page.unroute("**/api/ingests/*/crop", reject_crop)
+
+
+def test_roi_crop_success_creates_derived_draft_and_keeps_parent_source(ingest_page):
+    page = ingest_page
+    parent = upload(page)
+    page.get_by_test_id("source-view").click()
+    page.get_by_test_id("roi-candidate-roi-candidate-1").click()
+    with page.expect_response(lambda response: response.url.endswith("/crop") and response.request.method == "POST") as response:
+        page.get_by_test_id("roi-crop-submit").click()
+    assert response.value.status == 201, response.value.text()
+    expect(page.get_by_text("已按原图候选生成新草稿 · 原始证据保留", exact=True)).to_be_visible(timeout=30000)
+    expect(page.get_by_test_id("roi-derived-draft")).to_contain_text(parent["ingest_id"][:12])
+    source = page.get_by_alt_text("原始户型位图")
+    expect(source).to_be_visible()
+    expect(source).to_have_js_property("naturalWidth", 400)
+    page.get_by_role("button", name="规范化位图", exact=True).click()
+    normalized = page.get_by_alt_text("规范化户型位图")
+    expect(normalized).to_have_js_property("naturalWidth", 329)
+    page.get_by_role("button", name="候选叠加", exact=True).click()
+    expect(page.get_by_alt_text("原始户型位图")).to_have_js_property("naturalWidth", 400)

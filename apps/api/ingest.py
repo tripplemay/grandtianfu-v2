@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ingest import BitmapError
+from ingest.bitmap import roi_ingest_key
 
 from .revisions import StorageIntegrityError, strict_json
 
@@ -117,11 +118,97 @@ def ingest_bitmap_worker(data: bytes, filename: str, root: str | Path, *, mm_per
                 raise
 
 
+def _validated_roi_bbox(value: Any, pixel_size: dict[str, Any]) -> list[int]:
+    if not isinstance(value, list) or len(value) != 4 or any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        raise BitmapError("invalid_roi: bbox must contain four integer pixel values")
+    x, y, width, height = value
+    image_width, image_height = pixel_size.get("width"), pixel_size.get("height")
+    if not (isinstance(image_width, int) and isinstance(image_height, int) and image_width > 0 and image_height > 0):
+        raise StorageIntegrityError("Parent ingest has invalid normalized pixel dimensions")
+    if x < 0 or y < 0 or width <= 0 or height <= 0 or x + width > image_width or y + height > image_height:
+        raise BitmapError("invalid_roi: bbox must be inside the normalized source image")
+    return [x, y, width, height]
+
+
+def crop_ingest_worker(parent: dict[str, Any], bbox: list[int], root: str | Path) -> dict[str, Any]:
+    """Run deterministic recognition on a verified parent preprocessed artifact."""
+    parent_model = parent["model"]
+    scale = parent_model.get("ingest", {}).get("mm_per_pixel")
+    bbox = _validated_roi_bbox(bbox, parent_model["ingest"].get("pixel_size", {}))
+    parent_id = parent["ingest_id"]
+    parent_source_sha256 = parent_model["source"]["sha256"]
+    candidate_id, candidate_score = None, None
+    for candidate in parent_model.get("ingest", {}).get("evidence", {}).get("roi_candidates", []):
+        if candidate.get("evidence_bbox") == bbox:
+            candidate_id, candidate_score = candidate.get("id"), candidate.get("confidence")
+            break
+    ingest_id = roi_ingest_key(parent_id, parent_source_sha256, bbox, scale)
+    root_path = Path(root).resolve()
+    root_path.mkdir(parents=True, exist_ok=True)
+    final = root_path / ingest_id
+    with (root_path / ".worker.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise IngestUnavailable("ingest worker is busy; retry after the active task finishes") from exc
+        if final.exists():
+            return read_ingest(root_path, ingest_id)
+        parent_dir = root_path / parent_id
+        source_name = parent["manifest"]["files"]["source"]
+        source_data = (parent_dir / source_name).read_bytes()
+        preprocessed_data = (parent_dir / parent["manifest"]["files"]["preprocessed"]).read_bytes()
+        media_type = "image/png" if source_name.endswith(".png") else "image/jpeg"
+        with tempfile.TemporaryDirectory(prefix=".ingest-roi-", dir=root_path) as temp_dir:
+            temp = Path(temp_dir)
+            input_path = temp / "parent-preprocessed.png"
+            source_path = temp / source_name
+            output = temp / ingest_id
+            input_path.write_bytes(preprocessed_data)
+            source_path.write_bytes(source_data)
+            command = [sys.executable, "-m", "ingest.worker", "--input", str(input_path),
+                       "--output", str(output), "--mm-per-pixel", str(scale),
+                       "--filename", "roi.png", "--crop-bbox", *map(str, bbox),
+                       "--parent-ingest-id", parent_id, "--parent-source-sha256", parent_source_sha256,
+                       "--parent-source-file", str(source_path), "--parent-source-media-type", media_type]
+            if candidate_id is not None:
+                command.extend(["--roi-candidate-id", str(candidate_id)])
+            if candidate_score is not None:
+                command.extend(["--roi-candidate-score", str(candidate_score)])
+            try:
+                try:
+                    process = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+                except subprocess.TimeoutExpired as exc:
+                    raise IngestUnavailable("ROI ingest worker timed out after 120 seconds") from exc
+                except OSError as exc:
+                    raise IngestUnavailable("ROI ingest worker could not be started") from exc
+                if process.returncode:
+                    detail = (process.stderr or "ROI ingest worker failed").strip()[-2000:]
+                    if process.returncode in {2, 3}:
+                        raise BitmapError(detail)
+                    raise IngestUnavailable(detail)
+                result = read_ingest(temp, ingest_id)
+                model = result["model"]
+                if (model["source"]["sha256"] != parent_source_sha256
+                        or model["source"].get("parent_ingest_id") != parent_id
+                        or model["ingest"].get("roi", {}).get("bbox") != bbox):
+                    raise StorageIntegrityError("ROI worker provenance or source hash mismatch")
+                os.replace(output, final)
+                return result
+            except (BitmapError, IngestUnavailable, StorageIntegrityError) as exc:
+                _retain_failure(root_path, ingest_id, preprocessed_data, exc)
+                raise
+
+
 def ingest_response(result: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any]:
     ingest_id = result["ingest_id"]
+    parent_ingest_id = result["model"].get("source", {}).get("parent_ingest_id")
     return {
         **result, "model": envelope["model"], "envelope": envelope,
         "requires_human_review": envelope["model"]["status"] == "draft",
         "source_url": f"/api/ingests/{ingest_id}/artifacts/source",
         "preprocessed_url": f"/api/ingests/{ingest_id}/artifacts/preprocessed",
+        "parent_source_url": (f"/api/ingests/{parent_ingest_id}/artifacts/source"
+                               if isinstance(parent_ingest_id, str) else None),
+        "parent_preprocessed_url": (f"/api/ingests/{parent_ingest_id}/artifacts/preprocessed"
+                                     if isinstance(parent_ingest_id, str) else None),
     }

@@ -904,6 +904,72 @@ dd {
   color: #186a51;
   border-bottom-color: #186a51;
 }
+.roi-review {
+  border-bottom: 1px solid var(--line);
+  padding: 12px 16px 14px;
+  background: #fbfcfa;
+}
+.roi-review-heading,
+.roi-review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.roi-review-heading strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.roi-review-heading p {
+  margin: 4px 0 0;
+  font-size: 11px;
+}
+.roi-candidate-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.roi-candidate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 10px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  font-size: 11px;
+}
+.roi-candidate:hover,
+.roi-candidate.selected {
+  border-color: #bf7e26;
+  background: #fff8eb;
+}
+.roi-candidate small {
+  color: #7a8680;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.roi-review-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.roi-review-actions .muted {
+  font-size: 11px;
+}
+.workflow-status {
+  color: #526b5e;
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+.workflow-status code {
+  font-size: 10px;
+}
 .view-switch {
   display: flex;
   gap: 10px;

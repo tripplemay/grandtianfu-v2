@@ -19,6 +19,7 @@ from .bitmap import (
     BitmapAsset,
     BitmapError,
     canonical_json,
+    crop_ingest,
     ingest_bitmap,
     load_bitmap,
 )
@@ -36,6 +37,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--filename", default="upload")
     parser.add_argument("--revision", type=int, default=1)
     parser.add_argument("--mm-per-pixel", type=float, required=True)
+    parser.add_argument("--crop-bbox", nargs=4, type=int, default=None)
+    parser.add_argument("--parent-ingest-id", default=None)
+    parser.add_argument("--parent-source-sha256", default=None)
+    parser.add_argument("--parent-source-file", type=Path, default=None)
+    parser.add_argument("--parent-source-media-type", default=None)
+    parser.add_argument("--roi-candidate-id", default=None)
+    parser.add_argument("--roi-candidate-score", type=float, default=None)
     return parser
 
 
@@ -43,22 +51,26 @@ def _json_bytes(document: dict[str, Any]) -> bytes:
     return (canonical_json(document) + "\n").encode("utf-8")
 
 
-def _write_outputs(output: Path, model: dict[str, Any], asset: BitmapAsset, filename: str = "upload") -> dict[str, Any]:
+def _write_outputs(output: Path, model: dict[str, Any], asset: BitmapAsset, filename: str = "upload",
+                   *, source_data: bytes | None = None, source_media_type: str | None = None) -> dict[str, Any]:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     backup: Path | None = None
     try:
-        files = {"source": "source.png" if asset.media_type == "image/png" else "source.jpg",
+        media_type = source_media_type or asset.media_type
+        source_payload = source_data if source_data is not None else asset.data
+        files = {"source": "source.png" if media_type == "image/png" else "source.jpg",
                  "preprocessed": "preprocessed.png", "draft_model": "draft-model.json",
                  "preprocessing": "preprocess-manifest.json"}
-        preprocessing = {"schema_version": "ingest-preprocess-0.2", "source_sha256": asset.sha256,
+        source_sha256 = model["source"]["sha256"]
+        preprocessing = {"schema_version": "ingest-preprocess-0.2", "source_sha256": source_sha256,
                          **model["ingest"]["preprocessing"]}
-        payloads = {"source": asset.data, "preprocessed": asset.normalized_png,
+        payloads = {"source": source_payload, "preprocessed": asset.normalized_png,
                     "draft_model": _json_bytes(model), "preprocessing": _json_bytes(preprocessing)}
         hashes = {key: hashlib.sha256(payload).hexdigest() for key, payload in payloads.items()}
         for key, payload in payloads.items():
             (temporary / files[key]).write_bytes(payload)
-        manifest = {"schema_version": "ingest-0.2", "status": "draft", "source_sha256": asset.sha256,
+        manifest = {"schema_version": "ingest-0.2", "status": "draft", "source_sha256": source_sha256,
                     "ingest_id": model["ingest"]["ingest_id"], "model_id": model["model_id"],
                     "revision": model["revision"], "model_hash": canonical_hash(model),
                     "filename": filename, **model["ingest"], "files": files, "artifact_hashes": hashes}
@@ -98,14 +110,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"worker input error: {exc}", file=sys.stderr)
         return INPUT_ERROR
     try:
-        model = ingest_bitmap(data, filename=args.filename, model_id=args.model_id,
-                              revision=args.revision, mm_per_pixel=args.mm_per_pixel)
-        asset = load_bitmap(data)
+        if args.crop_bbox is not None:
+            if not args.parent_ingest_id or not args.parent_source_sha256 or args.parent_source_file is None:
+                raise BitmapError("invalid_roi: parent evidence is required")
+            model, asset = crop_ingest(data, parent_ingest_id=args.parent_ingest_id,
+                                       parent_source_sha256=args.parent_source_sha256,
+                                       bbox=list(args.crop_bbox), mm_per_pixel=args.mm_per_pixel,
+                                       candidate_id=args.roi_candidate_id, candidate_score=args.roi_candidate_score)
+            source_data = args.parent_source_file.read_bytes()
+            source_media_type = args.parent_source_media_type
+        else:
+            model = ingest_bitmap(data, filename=args.filename, model_id=args.model_id,
+                                  revision=args.revision, mm_per_pixel=args.mm_per_pixel)
+            asset = load_bitmap(data)
+            source_data = None
+            source_media_type = None
     except BitmapError as exc:
         print(f"worker ingest error: {exc}", file=sys.stderr)
         return INGEST_ERROR
     try:
-        manifest = _write_outputs(args.output, model, asset, args.filename)
+        manifest = _write_outputs(args.output, model, asset, args.filename,
+                                  source_data=source_data, source_media_type=source_media_type)
     except OSError as exc:
         print(f"worker output error: {exc}", file=sys.stderr)
         return OUTPUT_ERROR

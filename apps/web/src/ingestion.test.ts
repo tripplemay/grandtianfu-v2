@@ -4,6 +4,7 @@ import {
   readyToReview,
   reviewChecks,
   reviewObjects,
+  roiCandidates,
   validScale,
   type ReviewCheck,
 } from "./ingestion";
@@ -44,6 +45,50 @@ describe("import review gates", () => {
       ingest: { ingest_id: "job", mm_per_pixel: 1, hard_blockers: [{ code: "partial_plan" }] },
     } as SpatialModel;
     expect(readyToReview(blocked, all, checks, false)).toBe(false);
+  });
+});
+
+describe("ROI evidence", () => {
+  it("reads and validates preprocessing candidates without promoting them to geometry", () => {
+    const candidates = roiCandidates({
+      ingest: {
+        ingest_id: "job",
+        mm_per_pixel: 10,
+        preprocessing: {
+          roi_candidates: [
+            { id: "roi-2", rank: 2, evidence_bbox: [20, 30, 40, 50] },
+            { id: "roi-1", rank: 1, evidence_bbox: [1, 2, 3, 4] },
+            { id: "bad", evidence_bbox: [0, 0, -1, 2] },
+          ],
+        },
+      },
+      rooms: [],
+      walls: [],
+      openings: [],
+    } as unknown as SpatialModel);
+    expect(candidates.map((item) => item.id)).toEqual(["roi-1", "roi-2"]);
+    expect(candidates[0].evidence_bbox).toEqual([1, 2, 3, 4]);
+  });
+
+  it("deduplicates evidence and falls back to the audit evidence path", () => {
+    const candidates = roiCandidates({
+      ingest: {
+        ingest_id: "job",
+        mm_per_pixel: 10,
+        preprocessing: { roi_candidates: [{ id: "same", evidence_bbox: [1, 1, 5, 5] }] },
+        evidence: {
+          roi_candidates: [
+            { id: "same", evidence_bbox: [2, 2, 5, 5] },
+            { id: "other", evidence_bbox: [3, 3, 5, 5] },
+          ],
+        },
+      },
+      rooms: [],
+      walls: [],
+      openings: [],
+    } as unknown as SpatialModel);
+    expect(candidates.map((item) => item.id)).toEqual(["same", "other"]);
+    expect(candidates[0].evidence_bbox).toEqual([1, 1, 5, 5]);
   });
 });
 
