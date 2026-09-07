@@ -1,6 +1,6 @@
 # 阶段 4 ROI 候选检查点
 
-日期：2026-09-07。独立报告：`docs/test-reports/stage-4-roi-independent.md`；裁剪闭环验收：`docs/test-reports/stage-4-roi-crop-acceptance.md`。
+日期：2026-09-07。独立报告：`docs/test-reports/stage-4-roi-independent.md`；裁剪闭环验收：`docs/test-reports/stage-4-roi-crop-acceptance.md`；人工描图验收：`docs/test-reports/stage-4-manual-trace-acceptance.md`。
 
 **ROI 候选与人工裁剪闭环：PASS（有界）；完整阶段 4：PARTIAL。**
 
@@ -20,13 +20,15 @@
   映射回父坐标，并记录 parent ingest、父/裁剪 hash、候选评分和人工动作。
 - 工作台支持候选列表、原图坐标、叠加框、处理中/失败状态和派生草稿追溯；未选择候选时确认仍禁用。
 - 后端 155 项、前端 24 项、浏览器 E2E 6 项通过，包含桌面/移动端、失败和成功裁剪路径。
+- 新增自由 ROI 数值/拖框编辑，以及自动裁剪失败后的矩形人工描图；共享边界去重为公共墙，结果生成新的可追溯草稿。
+- 当前回归为 Python 167 项、前端 27 项、浏览器 E2E 10 项；描图草稿保留 `manual_trace_requires_topology_review`。
 
 ## 尚未完成
 
 - 没有 `roi_required` 专用错误契约，也没有标注 ROI IoU `>=0.90` 的正式数据集门禁。
 - 候选生成仍是启发式证据提取；用户真实图片的首选候选在裁剪后可能触发
   `overlapping_room_candidates` 并返回 422。系统保留父图与证据，不生成不可信几何，
-  但尚未提供自由手工 bbox/trace 编辑器来继续处理该情况。
+  但需要通过自由 ROI/trace 编辑器继续处理该情况。
 
-因此本检查点解决“宣传页先提出可审查区域候选并生成可追溯派生 ingest”，不解决整张真实四房户型的房间拓扑解析，
-不允许进入家具布局或照片级生成。下一步需实现自由 ROI/trace 编辑与多房间墙图解析。
+因此本检查点解决“宣传页先提出可审查区域候选、失败后人工描图并生成可追溯派生 ingest”，不解决整张真实四房户型的房间拓扑解析，
+不允许进入家具布局或照片级生成。下一步需实现门窗、连通性和 merge 拓扑校核。

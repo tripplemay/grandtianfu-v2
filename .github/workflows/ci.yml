@@ -71,5 +71,6 @@ jobs:
           path: |
             artifacts/e2e/
             artifacts/stage4-e2e/
+            artifacts/stage4-trace-e2e/
           if-no-files-found: ignore
           retention-days: 7

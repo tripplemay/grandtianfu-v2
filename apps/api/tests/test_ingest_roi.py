@@ -102,3 +102,19 @@ def test_roi_source_compare_and_swap_rejects_forged_hash(client: TestClient):
     response = client.post(f"/api/ingests/{parent['ingest_id']}/crop",
                            json={"expected_source_sha256": "0" * 64, "bbox": [36, 26, 329, 249]})
     assert response.status_code == 409
+
+
+def test_nested_roi_uses_root_source_and_global_overlay(client: TestClient):
+    result = _upload(client)
+    source_hash = result["model"]["source"]["sha256"]
+    for bbox in ([36, 26, 329, 249], [40, 30, 321, 241], [45, 35, 311, 231]):
+        response = _crop(client, result, bbox)
+        assert response.status_code == 201, response.text
+        result = response.json()
+        assert result["model"]["source"]["sha256"] == source_hash
+        assert result["model"]["ingest"]["pixel_size"] == {"width": 400, "height": 300}
+        assert result["overlay_url"] == result["normalized_source_url"]
+        overlay = client.get(result["overlay_url"])
+        assert overlay.status_code == 200
+        with Image.open(io.BytesIO(overlay.content)) as image:
+            assert image.size == (400, 300)

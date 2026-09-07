@@ -9,8 +9,9 @@ from typing import Any
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from ingest import BitmapError
+from ingest.bitmap import load_bitmap
 from spatial_core import canonical_hash
 from starlette.concurrency import run_in_threadpool
 from starlette.staticfiles import StaticFiles
@@ -32,6 +33,7 @@ from .revisions import (
     checked_model,
     strict_json,
 )
+from .tracing import trace_ingest_worker
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEED = ROOT / "packages/spatial_core/tests/fixtures/confirmed-orthogonal-merge.json"
@@ -182,13 +184,34 @@ def create_app(
         envelope = await run_in_threadpool(store.import_draft, result["model"])
         return ingest_response(result, envelope)
 
+    @app.post("/api/ingests/{ingest_id}/trace", status_code=201)
+    async def trace_ingest(ingest_id: str, request: Request):
+        body = await _body(request, {"expected_source_sha256", "bbox", "rooms", "wall_thickness_mm", "wall_height_mm"})
+        parent = await run_in_threadpool(verified_ingest, ingest_id)
+        if body["expected_source_sha256"] != parent["model"].get("source", {}).get("sha256"):
+            raise RevisionConflict({"model": parent["model"], "hash": canonical_hash(parent["model"])})
+        result = await run_in_threadpool(
+            trace_ingest_worker, parent, bbox=body["bbox"], rooms=body["rooms"],
+            wall_thickness_mm=body["wall_thickness_mm"], wall_height_mm=body["wall_height_mm"], root=intake_root(),
+        )
+        envelope = await run_in_threadpool(store.import_draft, result["model"])
+        return ingest_response(result, envelope)
+
     @app.get("/api/ingests/{ingest_id}/artifacts/{channel}")
     def ingest_artifact(ingest_id: str, channel: str):
         result = verified_ingest(ingest_id)
+        if channel == "normalized-source":
+            filename = result["manifest"]["files"]["source"]
+            data = (intake_root() / ingest_id / filename).read_bytes()
+            asset = load_bitmap(data, filename)
+            return Response(content=asset.normalized_png, media_type="image/png",
+                            headers={"X-Content-Type-Options": "nosniff",
+                                     "X-Normalized-Sha256": asset.normalization["normalized_sha256"]})
         if channel not in {"source", "preprocessed", "draft_model", "preprocessing"}:
             raise MissingRevision("Artifact not found")
         filename = result["manifest"]["files"][channel]
         return FileResponse(intake_root() / ingest_id / filename, headers={"X-Content-Type-Options": "nosniff"})
+
 
     @app.post("/api/ingests/{ingest_id}/confirm", status_code=201)
     async def confirm_ingest(ingest_id: str, request: Request):

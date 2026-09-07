@@ -31,10 +31,11 @@ import { resizeRoom, roomResizeLimits } from "./editing";
 import {
   CameraDialog,
   ImportDialog,
-  IngestSource,
   ReviewDialog,
 } from "./IngestWorkbench";
 import type { IngestResult, ReviewCheck } from "./ingestion";
+import { SourceEditor } from "./SourceEditor";
+import type { PixelRect, TraceInput } from "./tracing";
 import {
   updateFurniture,
   type Envelope,
@@ -241,6 +242,7 @@ export default function App() {
     pending: true,
   });
   const [busy, setBusy] = useState(false);
+  const [sourceDirty, setSourceDirty] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<Dialog | null>(null);
@@ -379,21 +381,21 @@ export default function App() {
 
   useEffect(() => {
     function preventLeave(event: BeforeUnloadEvent) {
-      if (dirty) {
+      if (dirty || sourceDirty) {
         event.preventDefault();
         event.returnValue = "";
       }
     }
     window.addEventListener("beforeunload", preventLeave);
     return () => window.removeEventListener("beforeunload", preventLeave);
-  }, [dirty]);
+  }, [dirty, sourceDirty]);
   useEffect(() => {
     if (dialog) modalRef.current?.showModal();
     else modalRef.current?.close();
   }, [dialog]);
 
   function guard(action: () => void) {
-    if (dirty)
+    if (dirty || sourceDirty)
       setDialog({
         title: "放弃未保存的修改？",
         body: "当前编辑尚未形成新版本。",
@@ -554,19 +556,20 @@ export default function App() {
     setMobilePanel("plan");
   }
 
-  async function cropIngest(roi: [number, number, number, number]) {
+  async function deriveIngest(action: "crop" | "trace", input: { bbox: PixelRect } | TraceInput) {
     if (!model?.ingest) throw new Error("当前模型没有位图导入记录");
+    if (dirty || historical || busy || model.status === "locked") throw new Error("请先保存当前修改并载入最新草稿");
     setBusy(true);
     setError("");
     try {
       const result = await request<IngestResult>(
-        `/api/ingests/${encodeURIComponent(model.ingest.ingest_id)}/crop`,
+        `/api/ingests/${encodeURIComponent(model.ingest.ingest_id)}/${action}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expected_source_sha256: model.source.sha256,
-            bbox: roi,
+            ...input,
           }),
         },
       );
@@ -583,7 +586,7 @@ export default function App() {
       install(result.envelope);
       setPlanView("source");
       setMobilePanel("plan");
-      setNotice("已按原图候选生成新草稿 · 原始证据保留");
+      setNotice(action === "crop" ? "已按原图候选生成新草稿 · 原始证据保留" : "人工描图草稿已生成 · 待拓扑校核");
       return result;
     } finally {
       setBusy(false);
@@ -790,7 +793,7 @@ export default function App() {
           <button
             className="button primary"
             disabled={
-              readOnly || !valid || (!dirty && model?.status === "confirmed")
+              readOnly || sourceDirty || !valid || (!dirty && model?.status === "confirmed")
             }
             onClick={() =>
               model?.ingest
@@ -813,6 +816,7 @@ export default function App() {
             disabled={
               renderBusy ||
               busy ||
+              sourceDirty ||
               dirty ||
               !model ||
               !model.cameras.length ||
@@ -1061,7 +1065,7 @@ export default function App() {
                     <button
                       className="source-tab"
                       aria-pressed={planView === "plan"}
-                      onClick={() => setPlanView("plan")}
+                      onClick={() => sourceDirty ? guard(() => setPlanView("plan")) : setPlanView("plan")}
                     >
                       二维平面
                     </button>
@@ -1108,7 +1112,10 @@ export default function App() {
             </div>
             {planView === "source" && model.ingest ? (
               ingestResult ? (
-                <IngestSource model={model} result={ingestResult} onCrop={cropIngest} />
+                <SourceEditor key={model.ingest.ingest_id} model={model} result={ingestResult} onDirtyChange={setSourceDirty}
+                  disabled={dirty || historical || busy || model.status === "locked"}
+                  onCrop={(bbox) => deriveIngest("crop", { bbox })}
+                  onTrace={(input) => deriveIngest("trace", input)} />
               ) : (
                 <div className="loading-state">
                   <LoaderCircle size={24} className="spin" />
@@ -1678,6 +1685,7 @@ export default function App() {
       <dialog
         ref={modalRef}
         className="confirm-dialog"
+        aria-label={dialog?.title}
         onCancel={(event) => {
           event.preventDefault();
           setDialog(null);
@@ -1711,7 +1719,7 @@ export default function App() {
         <ReviewDialog
           key={`${model.model_id}-${model.revision}`}
           model={model}
-          dirty={dirty}
+          dirty={dirty || sourceDirty}
           busy={busy}
           valid={valid && !historical}
           onClose={() => setWorkflowDialog(null)}

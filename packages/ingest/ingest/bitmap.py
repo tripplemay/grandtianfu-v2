@@ -25,6 +25,9 @@ from PIL import __version__ as pillow_version
 from spatial_core import validate_model
 
 ALGORITHM_VERSION = "orthogonal-cv-0.2"
+# Keep ROI identities separate from pre-v2 keys whose coordinate contract was
+# local-to-parent and could therefore reuse a drifting artifact.
+ROI_KEY_VERSION = "roi-crop-v2"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_SIDE = 12_000
 MAX_PIXELS = 50_000_000
@@ -522,6 +525,22 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                                    "pixel_geometry": {}, "geometry_mm": {}, "evidence_bbox": [],
                                    **source_ref, "confidence": 0.5, "provenance": "shared_wall_gap"})
     ocr, notes = _ocr_evidence(asset)
+    # Evidence is immutable input provenance too; attach the original source
+    # hash before any ROI mapping can move its pixel coordinates.
+    for item in ocr.get("dimensions", []):
+        item["source_asset_sha256"] = asset.sha256
+    preprocessing = {
+        **recognition["metadata"],
+        "source_sha256": asset.sha256,
+        "line_candidates": [
+            {**item, "source_asset_sha256": asset.sha256}
+            for item in recognition["metadata"].get("line_candidates", [])
+        ],
+        "roi_candidates": [
+            {**item, "source_asset_sha256": asset.sha256}
+            for item in recognition["metadata"].get("roi_candidates", [])
+        ],
+    }
     notes.append({"code": "unmeasured_heights", "message": "Wall and opening heights are defaults and must be reviewed"})
     if openings:
         notes.append({"code": "unclassified_wall_gaps", "message": "Wall gaps are passage candidates, not classified doors or windows"})
@@ -545,8 +564,10 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                    "media_type": asset.media_type, "source_sha256": asset.sha256,
                    "pixel_size": {"width": asset.width, "height": asset.height}, "mm_per_pixel": scale,
                    "scale_status": "user_supplied", "calibration": {"value": scale, "provenance": "user_scale", "confidence": 1.0, "needs_review": True},
-                   "preprocessing": recognition["metadata"], "candidates": candidates,
-                   "evidence": {"ocr": ocr, "unassigned_lines": recognition["unused"],
+                   "preprocessing": preprocessing, "candidates": candidates,
+                   "evidence": {"ocr": ocr,
+                                "unassigned_lines": [{**item, "source_asset_sha256": asset.sha256}
+                                                     for item in recognition["unused"]],
                                 "roi_candidates": [{**candidate, "source_asset_sha256": asset.sha256}
                                                    for candidate in recognition["metadata"]["roi_candidates"]]},
                    "warnings": notes, "hard_blockers": hard_blockers, "requires_human_review": True},
@@ -563,6 +584,7 @@ def roi_ingest_key(parent_ingest_id: str, parent_source_sha256: str,
     """Return a deterministic identity for a parent-backed ROI recognition."""
     scale = _scale(mm_per_pixel)
     parameters = {
+        "roi_key_version": ROI_KEY_VERSION,
         "parent_ingest_id": parent_ingest_id,
         "parent_source_sha256": parent_source_sha256,
         "bbox": bbox,
@@ -583,9 +605,56 @@ def _offset_pixel_bbox(value: Any, offset_x: int, offset_y: int) -> Any:
 
 
 def _offset_geometry(value: Any, offset_x_mm: float, offset_y_mm: float) -> Any:
-    if not isinstance(value, list) or len(value) != 4:
+    if isinstance(value, list) and len(value) == 4:
+        return [round(value[0] + offset_x_mm, 6), round(value[1] + offset_y_mm, 6), value[2], value[3]]
+    if isinstance(value, dict):
+        result = copy.deepcopy(value)
+        for key in ("x", "y"):
+            if isinstance(result.get(key), (int, float)) and not isinstance(result[key], bool):
+                result[key] = round(result[key] + (offset_x_mm if key == "x" else offset_y_mm), 6)
+        for key, item in list(result.items()):
+            if key in {"rect", "world_rect", "world_rect_mm"} and isinstance(item, list) and len(item) == 4:
+                result[key] = _offset_geometry(item, offset_x_mm, offset_y_mm)
+        return result
+    return value
+
+
+def _map_pixel_geometry(value: Any, offset_x: int, offset_y: int) -> Any:
+    if isinstance(value, list) and len(value) == 4:
+        return [value[0] + offset_x, value[1] + offset_y, value[2], value[3]]
+    if not isinstance(value, dict):
         return value
-    return [value[0] + offset_x_mm, value[1] + offset_y_mm, value[2], value[3]]
+    result = copy.deepcopy(value)
+    for key in ("x", "y"):
+        if isinstance(result.get(key), (int, float)) and not isinstance(result[key], bool):
+            result[key] += offset_x if key == "x" else offset_y
+    for key, item in list(result.items()):
+        if key in {"bbox", "rect", "pixel_rect"} and isinstance(item, list) and len(item) == 4:
+            result[key] = _map_pixel_geometry(item, offset_x, offset_y)
+    return result
+
+
+def _map_evidence_item(item: Any, offset_x: int, offset_y: int) -> None:
+    if not isinstance(item, dict):
+        return
+    for key in ("evidence_bbox", "pixel_bbox", "bbox"):
+        if isinstance(item.get(key), list) and len(item[key]) == 4:
+            item[key] = _offset_pixel_bbox(item[key], offset_x, offset_y)
+    if isinstance(item.get("paired_evidence"), list):
+        item["paired_evidence"] = [
+            _offset_pixel_bbox(box, offset_x, offset_y) if isinstance(box, list) and len(box) == 4 else box
+            for box in item["paired_evidence"]
+        ]
+    if isinstance(item.get("pixel_geometry"), dict):
+        item["pixel_geometry"] = _map_pixel_geometry(item["pixel_geometry"], offset_x, offset_y)
+    if item.get("axis") in {"h", "v"}:
+        along, across = (offset_x, offset_y) if item["axis"] == "h" else (offset_y, offset_x)
+        for key, offset in (("coordinate", across), ("start", along), ("end", along)):
+            if isinstance(item.get(key), (int, float)):
+                item[key] += offset
+        for key in ("intervals", "gaps"):
+            if isinstance(item.get(key), list):
+                item[key] = [[start + along, end + along] for start, end in item[key]]
 
 
 def _map_roi_coordinates(model: dict[str, Any], bbox: list[int], parent_ingest_id: str,
@@ -596,45 +665,77 @@ def _map_roi_coordinates(model: dict[str, Any], bbox: list[int], parent_ingest_i
     offset_x_mm, offset_y_mm = offset_x * scale, offset_y * scale
     mapped = copy.deepcopy(model)
     for wall in mapped["walls"]:
-        wall["x"] += offset_x_mm
-        wall["y"] += offset_y_mm
+        wall["x"] = round(wall["x"] + offset_x_mm, 6)
+        wall["y"] = round(wall["y"] + offset_y_mm, 6)
         for provenance_key in ("dimension_provenance",):
             provenance = wall.get(provenance_key)
             if isinstance(provenance, dict) and isinstance(provenance.get("pixel_value"), (int, float)):
                 provenance["parent_pixel_origin"] = [offset_x, offset_y]
+            if isinstance(provenance, dict) and "source_asset_sha256" in provenance:
+                provenance["source_asset_sha256"] = parent_source_sha256
     for room in mapped["rooms"]:
-        room["rect"] = _offset_geometry(room["rect"], offset_x_mm, offset_y_mm)
+        for key in ("rect", "world_rect", "world_rect_mm"):
+            if key in room:
+                room[key] = _offset_geometry(room[key], offset_x_mm, offset_y_mm)
         provenance = room.get("dimension_provenance")
         if isinstance(provenance, dict) and isinstance(provenance.get("pixel_rect"), list):
             provenance["pixel_rect"] = _offset_pixel_bbox(provenance["pixel_rect"], offset_x, offset_y)
+        if isinstance(provenance, dict):
+            for key in ("world_rect", "world_rect_mm"):
+                if key in provenance:
+                    provenance[key] = _offset_geometry(provenance[key], offset_x_mm, offset_y_mm)
+        if isinstance(provenance, dict) and "source_asset_sha256" in provenance:
+            provenance["source_asset_sha256"] = parent_source_sha256
+        if room.get("source_asset_sha256"):
+            room["source_asset_sha256"] = parent_source_sha256
     for candidate in mapped["ingest"].get("candidates", []):
         if isinstance(candidate, dict):
-            if "evidence_bbox" in candidate:
-                candidate["evidence_bbox"] = _offset_pixel_bbox(candidate["evidence_bbox"], offset_x, offset_y)
+            _map_evidence_item(candidate, offset_x, offset_y)
             geometry = candidate.get("geometry_mm")
             if geometry is not None:
                 candidate["geometry_mm"] = _offset_geometry(geometry, offset_x_mm, offset_y_mm)
-            pixels = candidate.get("pixel_geometry")
-            if isinstance(pixels, dict):
-                if isinstance(pixels.get("rect"), list):
-                    pixels["rect"] = _offset_pixel_bbox(pixels["rect"], offset_x, offset_y)
-                for key in ("x", "y"):
-                    if isinstance(pixels.get(key), (int, float)):
-                        pixels[key] += offset_x if key == "x" else offset_y
+            if candidate.get("source_asset_sha256"):
+                candidate["source_asset_sha256"] = parent_source_sha256
     evidence = mapped["ingest"].get("evidence", {})
     if isinstance(evidence, dict):
+        ocr = evidence.get("ocr")
+        if isinstance(ocr, dict):
+            for item in ocr.get("dimensions", []):
+                _map_evidence_item(item, offset_x, offset_y)
+        for item in evidence.get("unassigned_lines", []):
+            _map_evidence_item(item, offset_x, offset_y)
         for item in evidence.get("roi_candidates", []):
-            if isinstance(item, dict) and "evidence_bbox" in item:
-                item["evidence_bbox"] = _offset_pixel_bbox(item["evidence_bbox"], offset_x, offset_y)
-                item["source_asset_sha256"] = parent_source_sha256
+            if isinstance(item, dict):
+                _map_evidence_item(item, offset_x, offset_y)
+                if item.get("source_asset_sha256"):
+                    item["source_asset_sha256"] = parent_source_sha256
     preprocessing = mapped["ingest"].get("preprocessing", {})
     if isinstance(preprocessing, dict):
         preprocessing["source_sha256"] = parent_source_sha256
         preprocessing["crop_source_sha256"] = mapped["source"]["sha256"]
         for key in ("roi_candidates", "line_candidates"):
             for item in preprocessing.get(key, []):
-                if isinstance(item, dict) and "evidence_bbox" in item:
-                    item["evidence_bbox"] = _offset_pixel_bbox(item["evidence_bbox"], offset_x, offset_y)
+                if isinstance(item, dict):
+                    _map_evidence_item(item, offset_x, offset_y)
+                    if item.get("source_asset_sha256"):
+                        item["source_asset_sha256"] = parent_source_sha256
+    # Every recognized evidence record must identify the immutable root source,
+    # even when this model was produced from a nested crop.
+    def replace_hashes(value: Any) -> None:
+        if isinstance(value, dict):
+            if "source_asset_sha256" in value:
+                value["source_asset_sha256"] = parent_source_sha256
+            for child in value.values():
+                replace_hashes(child)
+        elif isinstance(value, list):
+            for child in value:
+                replace_hashes(child)
+    replace_hashes(mapped.get("walls", []))
+    replace_hashes(mapped.get("rooms", []))
+    replace_hashes(mapped.get("openings", []))
+    replace_hashes(mapped.get("ingest", {}).get("candidates", []))
+    replace_hashes(mapped.get("ingest", {}).get("evidence", {}))
+    replace_hashes(mapped.get("ingest", {}).get("preprocessing", {}))
     mapped["source"] = {
         "asset_id": f"sha256:{mapped['source']['sha256']}", "kind": "bitmap",
         "sha256": mapped["source"]["sha256"], "provenance": "manual_roi_crop",

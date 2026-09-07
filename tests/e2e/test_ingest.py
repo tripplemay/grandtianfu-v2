@@ -244,8 +244,118 @@ def test_roi_crop_success_creates_derived_draft_and_keeps_parent_source(ingest_p
     source = page.get_by_alt_text("原始户型位图")
     expect(source).to_be_visible()
     expect(source).to_have_js_property("naturalWidth", 400)
+
+
     page.get_by_role("button", name="规范化位图", exact=True).click()
     normalized = page.get_by_alt_text("规范化户型位图")
     expect(normalized).to_have_js_property("naturalWidth", 329)
     page.get_by_role("button", name="候选叠加", exact=True).click()
     expect(page.get_by_alt_text("原始户型位图")).to_have_js_property("naturalWidth", 400)
+
+
+def fill_rect(page, prefix, values):
+    for axis, value in zip("xywh", values):
+        page.get_by_test_id(f"{prefix}-{axis}").fill(str(value))
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 960}, {"width": 390, "height": 844}])
+def test_free_roi_failure_then_manual_multiroom_trace(ingest_page, viewport):
+    page = ingest_page
+    page.set_viewport_size(viewport)
+    parent = upload(page)
+    page.get_by_test_id("source-view").click()
+    fill_rect(page, "roi", [20, 20, 360, 260])
+    expect(page.get_by_test_id("roi-crop-submit")).to_be_enabled()
+    fill_rect(page, "roi", [20, 20, 400, 260])
+    expect(page.get_by_test_id("roi-crop-submit")).to_be_disabled()
+    fill_rect(page, "roi", [20, 20, 360, 260])
+
+    def reject(route):
+        route.fulfill(status=422, content_type="application/json", body='{"detail":"overlapping_room_candidates"}')
+
+    page.route("**/api/ingests/*/crop", reject)
+    page.get_by_test_id("roi-crop-submit").click()
+    expect(page.get_by_test_id("roi-crop-error")).to_contain_text("overlapping_room_candidates")
+    page.unroute("**/api/ingests/*/crop", reject)
+    expect(page.get_by_test_id("roi-x")).to_have_value("20")
+    page.get_by_test_id("trace-room-name").fill("Living")
+    fill_rect(page, "trace-room", [40.25, 40, 139.75, 200])
+    page.get_by_test_id("trace-room-apply").click()
+    expect(page.get_by_test_id("trace-room-select-0")).to_have_text("Living")
+    page.get_by_role("button", name="新增房间", exact=True).click()
+    page.get_by_test_id("trace-room-name").fill("Dining")
+    fill_rect(page, "trace-room", [180, 40, 170, 200])
+    page.get_by_test_id("trace-room-apply").click()
+    page.get_by_role("button", name="撤销描图", exact=True).click()
+    expect(page.get_by_test_id("trace-room-select-1")).not_to_be_visible()
+    page.get_by_role("button", name="重做描图", exact=True).click()
+    expect(page.get_by_test_id("trace-room-select-1")).to_have_text("Dining")
+    page.get_by_test_id("trace-wall-thickness").fill("120.5")
+    page.get_by_test_id("trace-wall-height").fill("2800")
+    expect(page.get_by_test_id("trace-submit")).to_be_enabled()
+    page.get_by_role("button", name="二维平面", exact=True).click()
+    expect(page.get_by_role("dialog", name="放弃未保存的修改？")).to_be_visible()
+    page.get_by_role("dialog").get_by_role("button", name="取消", exact=True).click()
+    expect(page.get_by_test_id("trace-room-select-1")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    screenshots = ROOT / "artifacts/stage4-trace-e2e"
+    screenshots.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshots / f"manual-trace-{viewport['width']}.png"), full_page=True)
+    with page.expect_response(lambda r: r.url.endswith("/trace") and r.request.method == "POST") as response:
+        page.get_by_test_id("trace-submit").click()
+    assert response.value.status == 201, response.value.text()
+    child = response.value.json()
+    model = child["model"]
+    assert child["ingest_id"] != parent["ingest_id"]
+    assert model["source"]["sha256"] == parent["model"]["source"]["sha256"]
+    assert model["rooms"][0]["rect"] == [402.5, 400, 1397.5, 2000]
+    shared = [w for w in model["walls"] if w["axis"] == "v" and w["x"] == 1800]
+    assert len(shared) == 1
+    assert all(shared[0]["id"] in r["boundary_wall_ids"] for r in model["rooms"])
+    assert model["openings"] == []
+    assert model["ingest"]["hard_blockers"][0]["code"] == "manual_trace_requires_topology_review"
+    expect(page.get_by_text("人工描图草稿已生成 · 待拓扑校核", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="生成 3D", exact=True)).to_be_disabled()
+    page.get_by_role("button", name="确认版本", exact=True).click()
+    expect(page.get_by_test_id("review-submit")).to_be_disabled()
+
+
+@pytest.mark.parametrize("touch", [False, True])
+def test_roi_reverse_drag_and_room_drag(ingest_page, touch):
+    page = ingest_page
+    if touch:
+        page.set_viewport_size({"width": 390, "height": 844})
+    upload(page)
+    page.get_by_test_id("source-view").click()
+    page.get_by_role("button", name="绘制户型区域", exact=True).click()
+    surface = page.get_by_test_id("candidate-overlay")
+    surface.scroll_into_view_if_needed()
+    bounds = surface.bounding_box()
+    def position(x, y):
+        return bounds["x"] + x / 400 * bounds["width"], bounds["y"] + y / 300 * bounds["height"]
+    def drag(first, last):
+        if touch:
+            session = page.context.new_cdp_session(page)
+            session.send("Emulation.setTouchEmulationEnabled", {"enabled": True})
+            x, y = position(*first)
+            session.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+            x, y = position(*last)
+            session.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": x, "y": y}]})
+            session.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            session.detach()
+        else:
+            page.mouse.move(*position(*first))
+            page.mouse.down()
+            page.mouse.move(*position(*last), steps=8)
+            page.mouse.up()
+    drag((380, 280), (20, 20))
+    assert abs(float(page.get_by_test_id("roi-x").input_value()) - 20) <= 1
+    expect(page.get_by_test_id("roi-crop-submit")).to_be_enabled()
+    page.get_by_role("button", name="绘制矩形房间", exact=True).click()
+    surface.scroll_into_view_if_needed()
+    bounds = surface.bounding_box()
+    drag((40, 40), (180, 240))
+    expect(page.get_by_test_id("trace-room-select-0")).to_have_text("房间 1")
+    page.get_by_role("button", name="删除描图房间", exact=True).click()
+    expect(page.get_by_test_id("trace-room-select-0")).not_to_be_visible()
+    expect(page.get_by_test_id("trace-submit")).to_be_disabled()

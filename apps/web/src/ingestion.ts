@@ -7,6 +7,8 @@ export type IngestResult = {
   manifest: Record<string, unknown>;
   source_url: string;
   preprocessed_url?: string;
+  normalized_source_url?: string;
+  overlay_url?: string;
   parent_source_url?: string | null;
   parent_preprocessed_url?: string | null;
 };

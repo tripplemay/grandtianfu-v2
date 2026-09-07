@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ingest import BitmapError
-from ingest.bitmap import roi_ingest_key
+from ingest.bitmap import load_bitmap, roi_ingest_key
 
 from .revisions import StorageIntegrityError, strict_json
 
@@ -134,7 +134,6 @@ def crop_ingest_worker(parent: dict[str, Any], bbox: list[int], root: str | Path
     """Run deterministic recognition on a verified parent preprocessed artifact."""
     parent_model = parent["model"]
     scale = parent_model.get("ingest", {}).get("mm_per_pixel")
-    bbox = _validated_roi_bbox(bbox, parent_model["ingest"].get("pixel_size", {}))
     parent_id = parent["ingest_id"]
     parent_source_sha256 = parent_model["source"]["sha256"]
     candidate_id, candidate_score = None, None
@@ -156,14 +155,22 @@ def crop_ingest_worker(parent: dict[str, Any], bbox: list[int], root: str | Path
         parent_dir = root_path / parent_id
         source_name = parent["manifest"]["files"]["source"]
         source_data = (parent_dir / source_name).read_bytes()
-        preprocessed_data = (parent_dir / parent["manifest"]["files"]["preprocessed"]).read_bytes()
-        media_type = "image/png" if source_name.endswith(".png") else "image/jpeg"
+        if hashlib.sha256(source_data).hexdigest() != parent_source_sha256:
+            raise StorageIntegrityError("Parent source artifact hash mismatch")
+        # The source artifact is retained unchanged through an ROI chain. Decode
+        # it afresh so EXIF orientation and dimensions always describe the root
+        # normalized bitmap, never an immediate parent's cropped preprocessed PNG.
+        source_asset = load_bitmap(source_data, source_name)
+        bbox = _validated_roi_bbox(
+            bbox, {"width": source_asset.width, "height": source_asset.height}
+        )
+        media_type = source_asset.media_type
         with tempfile.TemporaryDirectory(prefix=".ingest-roi-", dir=root_path) as temp_dir:
             temp = Path(temp_dir)
-            input_path = temp / "parent-preprocessed.png"
+            input_path = temp / source_name
             source_path = temp / source_name
             output = temp / ingest_id
-            input_path.write_bytes(preprocessed_data)
+            input_path.write_bytes(source_data)
             source_path.write_bytes(source_data)
             command = [sys.executable, "-m", "ingest.worker", "--input", str(input_path),
                        "--output", str(output), "--mm-per-pixel", str(scale),
@@ -195,7 +202,7 @@ def crop_ingest_worker(parent: dict[str, Any], bbox: list[int], root: str | Path
                 os.replace(output, final)
                 return result
             except (BitmapError, IngestUnavailable, StorageIntegrityError) as exc:
-                _retain_failure(root_path, ingest_id, preprocessed_data, exc)
+                _retain_failure(root_path, ingest_id, source_data, exc)
                 raise
 
 
@@ -207,6 +214,11 @@ def ingest_response(result: dict[str, Any], envelope: dict[str, Any]) -> dict[st
         "requires_human_review": envelope["model"]["status"] == "draft",
         "source_url": f"/api/ingests/{ingest_id}/artifacts/source",
         "preprocessed_url": f"/api/ingests/{ingest_id}/artifacts/preprocessed",
+        # Both names point at the verified normalized root pixels.  A child
+        # preprocessed artifact is intentionally crop-local and is not suitable
+        # as a global-coordinate overlay.
+        "normalized_source_url": f"/api/ingests/{ingest_id}/artifacts/normalized-source",
+        "overlay_url": f"/api/ingests/{ingest_id}/artifacts/normalized-source",
         "parent_source_url": (f"/api/ingests/{parent_ingest_id}/artifacts/source"
                                if isinstance(parent_ingest_id, str) else None),
         "parent_preprocessed_url": (f"/api/ingests/{parent_ingest_id}/artifacts/preprocessed"
