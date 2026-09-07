@@ -885,6 +885,54 @@ dd {
   overflow-y: auto;
   display: block;
 }
+
+.topology-editor {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  overflow: auto;
+  max-height: calc(100dvh - 180px);
+}
+.topology-heading, .topology-section .roi-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.topology-heading p { margin: 4px 0 0; }
+.topology-section {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.topology-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(70px, .6fr) minmax(130px, 1fr) minmax(100px, .8fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+.topology-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.topology-row-actions { display: flex; gap: 2px; }
+.topology-evidence { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.topology-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.3fr) minmax(100px, .7fr) repeat(4, minmax(80px, 1fr));
+  gap: 8px;
+}
+.topology-form label, .topology-room-picker label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.topology-form input, .topology-form select { min-width: 0; }
+.topology-room-picker { display: flex; flex-wrap: wrap; gap: 12px; }
+.topology-room-picker label { display: flex; align-items: center; gap: 6px; color: var(--text); }
+
+@media (max-width: 800px) {
+  .topology-form { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .topology-row { grid-template-columns: 1fr auto; }
+  .topology-row > :not(.topology-id):not(button) { font-size: 12px; }
+}
 .source-editor .source-image-scroll {
   overflow: visible;
 }

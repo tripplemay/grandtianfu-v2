@@ -318,6 +318,30 @@ def test_free_roi_failure_then_manual_multiroom_trace(ingest_page, viewport):
     expect(page.get_by_role("button", name="生成 3D", exact=True)).to_be_disabled()
     page.get_by_role("button", name="确认版本", exact=True).click()
     expect(page.get_by_test_id("review-submit")).to_be_disabled()
+    page.get_by_role("dialog", name="人工校核").get_by_role("button", name="取消", exact=True).click()
+    page.get_by_test_id("topology-view").click()
+    expect(page.get_by_test_id("topology-editor")).to_be_visible()
+    host_wall = next(wall for wall in model["walls"] if wall["length"] >= 900)
+    page.get_by_role("combobox", name="宿主墙体", exact=True).select_option(host_wall["id"])
+    page.get_by_test_id("topology-add-opening").click()
+    page.get_by_test_id("topology-opening-0").get_by_role("button", name="编辑开口", exact=True).click()
+    page.get_by_label("宽度", exact=True).fill("800")
+    page.get_by_test_id("topology-add-opening").click()
+    expect(page.get_by_test_id("topology-opening-0")).to_contain_text("0 + 800")
+    page.get_by_label("Living", exact=True).check()
+    page.get_by_label("Dining", exact=True).check()
+    page.get_by_test_id("topology-add-group").click()
+    expect(page.get_by_test_id("topology-group-0")).to_contain_text("共享墙：")
+    with page.expect_response(lambda r: r.url.endswith("/topology") and r.request.method == "POST") as response:
+        page.get_by_test_id("topology-submit").click()
+    assert response.value.status == 201, response.value.text()
+    topology = response.value.json()
+    assert topology["model"]["source"]["provenance"] == "manual_topology"
+    assert topology["model"]["openings"]
+    assert topology["model"]["rooms"][0]["merge_group_id"]
+    expect(page.get_by_text("拓扑审核草稿已生成 · 待人工确认", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="生成 3D", exact=True)).to_be_disabled()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
 @pytest.mark.parametrize("touch", [False, True])

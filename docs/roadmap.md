@@ -61,9 +61,10 @@
 `docs/specs/stage-4-integration.md`，结果见 `docs/stages/stage-4-integration-report.md`。
 当前等待用户确认；完整阶段门仍未完成，禁止提前进入阶段 5。
 
-阶段 4 的 ROI 候选生成与人工裁剪闭环已完成有界验收；当前继续在 4C1 做自由 ROI 与矩形人工描图，
-仍未完成全屋拓扑。实现和边界见 `docs/specs/stage-4-manual-trace.md`、
-`docs/test-reports/stage-4-manual-trace-acceptance.md`。
+阶段 4 的 ROI 候选生成、人工裁剪、矩形描图和 4C2 拓扑审核已完成有界验收；实现和边界见
+`docs/specs/stage-4-manual-trace.md`、`docs/specs/stage-4-topology-review.md`、
+`docs/test-reports/stage-4-topology-acceptance.md`。独立复验报告见
+`docs/test-reports/stage-4-topology-independent-recheck.md`。当前仍保留人工确认阻断，等待用户确认后再进入下一阶段。
 
 目标：把位图变成可确认的工程化平面草稿。
 

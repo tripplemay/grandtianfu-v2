@@ -33,6 +33,7 @@ from .revisions import (
     checked_model,
     strict_json,
 )
+from .topology import topology_ingest_worker
 from .tracing import trace_ingest_worker
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -193,6 +194,19 @@ def create_app(
         result = await run_in_threadpool(
             trace_ingest_worker, parent, bbox=body["bbox"], rooms=body["rooms"],
             wall_thickness_mm=body["wall_thickness_mm"], wall_height_mm=body["wall_height_mm"], root=intake_root(),
+        )
+        envelope = await run_in_threadpool(store.import_draft, result["model"])
+        return ingest_response(result, envelope)
+
+    @app.post("/api/ingests/{ingest_id}/topology", status_code=201)
+    async def review_topology(ingest_id: str, request: Request):
+        body = await _body(request, {"expected_source_sha256", "openings", "merge_groups", "reviewed_object_ids"})
+        parent = await run_in_threadpool(verified_ingest, ingest_id)
+        if body["expected_source_sha256"] != parent["model"].get("source", {}).get("sha256"):
+            raise RevisionConflict({"model": parent["model"], "hash": canonical_hash(parent["model"])})
+        result = await run_in_threadpool(
+            topology_ingest_worker, parent, openings=body["openings"], merge_groups=body["merge_groups"],
+            reviewed_object_ids=body["reviewed_object_ids"], root=intake_root(),
         )
         envelope = await run_in_threadpool(store.import_draft, result["model"])
         return ingest_response(result, envelope)

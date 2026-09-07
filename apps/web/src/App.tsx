@@ -36,6 +36,8 @@ import {
 import type { IngestResult, ReviewCheck } from "./ingestion";
 import { SourceEditor } from "./SourceEditor";
 import type { PixelRect, TraceInput } from "./tracing";
+import { TopologyEditor } from "./TopologyEditor";
+import type { TopologyInput } from "./topology";
 import {
   updateFurniture,
   type Envelope,
@@ -556,7 +558,7 @@ export default function App() {
     setMobilePanel("plan");
   }
 
-  async function deriveIngest(action: "crop" | "trace", input: { bbox: PixelRect } | TraceInput) {
+  async function deriveIngest(action: "crop" | "trace" | "topology", input: { bbox: PixelRect } | TraceInput | TopologyInput) {
     if (!model?.ingest) throw new Error("当前模型没有位图导入记录");
     if (dirty || historical || busy || model.status === "locked") throw new Error("请先保存当前修改并载入最新草稿");
     setBusy(true);
@@ -586,7 +588,7 @@ export default function App() {
       install(result.envelope);
       setPlanView("source");
       setMobilePanel("plan");
-      setNotice(action === "crop" ? "已按原图候选生成新草稿 · 原始证据保留" : "人工描图草稿已生成 · 待拓扑校核");
+      setNotice(action === "crop" ? "已按原图候选生成新草稿 · 原始证据保留" : action === "trace" ? "人工描图草稿已生成 · 待拓扑校核" : "拓扑审核草稿已生成 · 待人工确认");
       return result;
     } finally {
       setBusy(false);
@@ -1077,6 +1079,16 @@ export default function App() {
                     >
                       源图对照
                     </button>
+                    {model.ingest.trace !== undefined && (
+                      <button
+                        className="source-tab"
+                        data-testid="topology-view"
+                        aria-pressed={planView === "topology"}
+                        onClick={() => sourceDirty ? guard(() => setPlanView("topology")) : setPlanView("topology")}
+                      >
+                        拓扑审核
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <span className="view-tab">二维平面</span>
@@ -1110,7 +1122,14 @@ export default function App() {
                 </IconButton>
               </div>
             </div>
-            {planView === "source" && model.ingest ? (
+            {planView === "topology" && model.ingest ? (
+              ingestResult ? (
+                <TopologyEditor key={model.ingest.ingest_id} model={model} result={ingestResult}
+                  disabled={dirty || historical || busy || model.status === "locked"}
+                  onDirtyChange={setSourceDirty}
+                  onTopology={(input) => deriveIngest("topology", input)} />
+              ) : <div className="loading-state"><LoaderCircle size={24} className="spin" /></div>
+            ) : planView === "source" && model.ingest ? (
               ingestResult ? (
                 <SourceEditor key={model.ingest.ingest_id} model={model} result={ingestResult} onDirtyChange={setSourceDirty}
                   disabled={dirty || historical || busy || model.status === "locked"}
