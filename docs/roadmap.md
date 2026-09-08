@@ -72,7 +72,9 @@
 4C3 已通过独立复验，等待用户确认；不能据此宣称自动全屋识别或完整阶段 4 完成。
 
 当前缺陷修复批次 4D 针对复杂宣传页的多房间候选识别，规格见
-`docs/specs/stage-4d-multi-room-bitmap-recognition.md`。当严格闭合矩形只得到一个房间时，worker 会在高排名户型 ROI 内执行结构线二次解析，输出低置信度候选并继续保留人工拓扑阻断。4D 未通过独立验收前，不得据此宣称自动全屋识别完成。
+`docs/specs/stage-4d-multi-room-bitmap-recognition.md`。当严格闭合矩形只得到一个房间时，worker 会在高排名户型 ROI 内执行结构线二次解析，输出低置信度候选并继续保留人工拓扑阻断；即使 4D 通过，也不得据此宣称自动全屋识别完成。
+
+4D 已通过独立验收和用户验收，记录见 `docs/test-reports/stage-4d-acceptance.md`。
 
 目标：把位图变成可确认的工程化平面草稿。
 
