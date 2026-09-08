@@ -14,6 +14,10 @@ build/
 .env.*
 !.env.example
 data/
+!data/datasets/
+!data/datasets/stage4e-real/
+!data/datasets/stage4e-real/README.md
+!data/datasets/stage4e-real/manifest.json
 artifacts/
 uploads/
 node_modules/
