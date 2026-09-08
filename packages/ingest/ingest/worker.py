@@ -1,0 +1,142 @@
+"""Isolated CPU ingest worker with immutable, atomically published artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from spatial_core import canonical_hash
+
+from .bitmap import (
+    MAX_FILE_BYTES,
+    BitmapAsset,
+    BitmapError,
+    canonical_json,
+    crop_ingest,
+    ingest_bitmap,
+    load_bitmap,
+)
+
+INPUT_ERROR = 2
+INGEST_ERROR = 3
+OUTPUT_ERROR = 4
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Recognize a reviewable orthogonal PNG/JPEG draft")
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--filename", default="upload")
+    parser.add_argument("--revision", type=int, default=1)
+    parser.add_argument("--mm-per-pixel", type=float, required=True)
+    parser.add_argument("--crop-bbox", nargs=4, type=int, default=None)
+    parser.add_argument("--parent-ingest-id", default=None)
+    parser.add_argument("--parent-source-sha256", default=None)
+    parser.add_argument("--parent-source-file", type=Path, default=None)
+    parser.add_argument("--parent-source-media-type", default=None)
+    parser.add_argument("--roi-candidate-id", default=None)
+    parser.add_argument("--roi-candidate-score", type=float, default=None)
+    return parser
+
+
+def _json_bytes(document: dict[str, Any]) -> bytes:
+    return (canonical_json(document) + "\n").encode("utf-8")
+
+
+def _write_outputs(output: Path, model: dict[str, Any], asset: BitmapAsset, filename: str = "upload",
+                   *, source_data: bytes | None = None, source_media_type: str | None = None) -> dict[str, Any]:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    backup: Path | None = None
+    try:
+        media_type = source_media_type or asset.media_type
+        source_payload = source_data if source_data is not None else asset.data
+        files = {"source": "source.png" if media_type == "image/png" else "source.jpg",
+                 "preprocessed": "preprocessed.png", "draft_model": "draft-model.json",
+                 "preprocessing": "preprocess-manifest.json"}
+        source_sha256 = model["source"]["sha256"]
+        preprocessing = {"schema_version": "ingest-preprocess-0.2", "source_sha256": source_sha256,
+                         **model["ingest"]["preprocessing"]}
+        payloads = {"source": source_payload, "preprocessed": asset.normalized_png,
+                    "draft_model": _json_bytes(model), "preprocessing": _json_bytes(preprocessing)}
+        hashes = {key: hashlib.sha256(payload).hexdigest() for key, payload in payloads.items()}
+        for key, payload in payloads.items():
+            (temporary / files[key]).write_bytes(payload)
+        manifest = {"schema_version": "ingest-0.2", "status": "draft", "source_sha256": source_sha256,
+                    "ingest_id": model["ingest"]["ingest_id"], "model_id": model["model_id"],
+                    "revision": model["revision"], "model_hash": canonical_hash(model),
+                    "filename": filename, **model["ingest"], "files": files, "artifact_hashes": hashes}
+        (temporary / "ingest-manifest.json").write_bytes(_json_bytes(manifest))
+        for key, artifact_name in files.items():
+            if hashlib.sha256((temporary / artifact_name).read_bytes()).hexdigest() != hashes[key]:
+                raise OSError(f"artifact verification failed: {key}")
+        if output.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{output.name}.previous.", dir=output.parent))
+            backup.rmdir()
+            os.replace(output, backup)
+        try:
+            os.replace(temporary, output)
+        except OSError:
+            if backup is not None:
+                os.replace(backup, output)
+                backup = None
+            raise
+        if backup is not None:
+            shutil.rmtree(backup)
+        return manifest
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.input.stat().st_size > MAX_FILE_BYTES:
+            raise BitmapError("input_too_large: maximum file size is 20 MiB")
+        data = args.input.read_bytes()
+    except BitmapError as exc:
+        print(f"worker ingest error: {exc}", file=sys.stderr)
+        return INGEST_ERROR
+    except OSError as exc:
+        print(f"worker input error: {exc}", file=sys.stderr)
+        return INPUT_ERROR
+    try:
+        if args.crop_bbox is not None:
+            if not args.parent_ingest_id or not args.parent_source_sha256 or args.parent_source_file is None:
+                raise BitmapError("invalid_roi: parent evidence is required")
+            model, asset = crop_ingest(data, parent_ingest_id=args.parent_ingest_id,
+                                       parent_source_sha256=args.parent_source_sha256,
+                                       bbox=list(args.crop_bbox), mm_per_pixel=args.mm_per_pixel,
+                                       candidate_id=args.roi_candidate_id, candidate_score=args.roi_candidate_score)
+            source_data = args.parent_source_file.read_bytes()
+            source_media_type = args.parent_source_media_type
+        else:
+            model = ingest_bitmap(data, filename=args.filename, model_id=args.model_id,
+                                  revision=args.revision, mm_per_pixel=args.mm_per_pixel)
+            asset = load_bitmap(data)
+            source_data = None
+            source_media_type = None
+    except BitmapError as exc:
+        print(f"worker ingest error: {exc}", file=sys.stderr)
+        return INGEST_ERROR
+    try:
+        manifest = _write_outputs(args.output, model, asset, args.filename,
+                                  source_data=source_data, source_media_type=source_media_type)
+    except OSError as exc:
+        print(f"worker output error: {exc}", file=sys.stderr)
+        return OUTPUT_ERROR
+    print(json.dumps({key: manifest[key] for key in ("model_id", "revision", "status", "source_sha256", "ingest_id")}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
