@@ -50,6 +50,31 @@ def test_shared_wall_produces_two_elementary_nonoverlapping_rooms():
     assert len(set(model["rooms"][0]["boundary_wall_ids"]) & set(model["rooms"][1]["boundary_wall_ids"])) == 3
 
 
+def test_brochure_roi_fallback_recovers_multiple_room_candidates():
+    image = Image.new("RGB", (1200, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    # Simulate a marketing page title block above an orthogonal plan.
+    for y in (80, 110, 140):
+        draw.line((100, y, 1100, y), fill="gray", width=2)
+    draw.rectangle((180, 300, 1020, 900), outline="black", width=12)
+    draw.line((500, 300, 500, 900), fill="black", width=10)
+    draw.line((750, 300, 750, 900), fill="black", width=10)
+    for x in (480, 730):
+        draw.rectangle((x, 295, x + 50, 320), fill="white")
+    draw.line((180, 600, 500, 600), fill="black", width=10)
+    draw.rectangle((460, 580, 520, 620), fill="white")
+
+    model = ingest_bitmap(encode(image), mm_per_pixel=10)
+    assert len(model["rooms"]) == 3
+    assert model["ingest"]["preprocessing"]["room_detection"]["mode"] == "roi_structural_components"
+    assert all(room["provenance"] == "roi_structural_component" for room in model["rooms"])
+    assert all(room["confidence"] < 0.5 and room["needs_review"] for room in model["rooms"])
+    roi_candidates = [item for item in model["ingest"]["candidates"] if item["kind"] in {"room", "wall"}]
+    assert all(item["provenance"] == "roi_structural_component" for item in roi_candidates)
+    assert all(item["confidence"] < 0.5 and item["needs_review"] for item in roi_candidates)
+    assert model["ingest"]["hard_blockers"][0]["code"] == "partial_plan_requires_manual_trace"
+
+
 @pytest.mark.parametrize("size,rect,stroke,scale,gap", [
     ((400, 300), (40, 30, 360, 270), 1, 10, (175, 200)),
     ((400, 300), (40, 30, 360, 270), 5, 12.5, (175, 200)),

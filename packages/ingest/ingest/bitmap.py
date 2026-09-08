@@ -340,6 +340,80 @@ def _covers(line: dict[str, Any], start: float, end: float) -> bool:
     return missing <= 0.2 * (end - start)
 
 
+def _roi_component_faces(binary: np.ndarray, roi: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recover room-sized free-space components inside a marketing-page ROI.
+
+    The primary recognizer intentionally uses a strict closed-rectangle rule. A
+    brochure plan usually has furniture, labels, and door gaps which violate
+    that rule even when the structural walls are orthogonal. This fallback
+    treats long orthogonal strokes as a wall mask and returns disjoint
+    component boxes as *candidates*; they remain review-gated and are never
+    promoted to confirmed topology by this function alone.
+    """
+    bbox = roi.get("evidence_bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return []
+    x0, y0, width, height = (round(value) for value in bbox)
+    if width < 200 or height < 160:
+        return []
+    crop = binary[y0:y0 + height, x0:x0 + width]
+    if crop.size == 0:
+        return []
+    minimum = max(13, int(min(width, height) * 0.045)) | 1
+    maximum_gap = max(4, int(min(width, height) * 0.16))
+    raw = _segments(crop, "h", minimum) + _segments(crop, "v", minimum)
+    lines = _pair_parallel(_group_lines([item for item in raw if item["axis"] == "h"], maximum_gap), minimum / 2)
+    lines += _pair_parallel(_group_lines([item for item in raw if item["axis"] == "v"], maximum_gap), minimum / 2)
+
+    wall_mask = np.zeros_like(crop)
+    structural_length = max(180, int(min(width, height) * 0.18))
+    for line in lines:
+        line_length = line["end"] - line["start"]
+        if line["thickness"] < 2 and line_length < structural_length:
+            continue
+        thickness = max(3, round(line["thickness"]))
+        if line["axis"] == "h":
+            start = (round(line["start"]), round(line["coordinate"]))
+            end = (round(line["end"]), round(line["coordinate"]))
+        else:
+            start = (round(line["coordinate"]), round(line["start"]))
+            end = (round(line["coordinate"]), round(line["end"]))
+        cv2.line(wall_mask, start, end, 255, thickness=thickness, lineType=cv2.LINE_8)
+    wall_mask = cv2.morphologyEx(
+        wall_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    )
+    wall_mask = cv2.dilate(wall_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+    free_space = cv2.bitwise_not(wall_mask)
+    labels_count, _labels, stats, _ = cv2.connectedComponentsWithStats(free_space, 4)
+    minimum_area = max(40_000, int(width * height * 0.014))
+    minimum_width = max(150, int(width * 0.07))
+    minimum_height = max(120, int(height * 0.07))
+    faces: list[dict[str, Any]] = []
+    for index in range(1, labels_count):
+        local_x, local_y, local_width, local_height, area = (int(value) for value in stats[index])
+        if area < minimum_area or local_width < minimum_width or local_height < minimum_height:
+            continue
+        # A component touching the ROI edge is page background, not a room.
+        if local_x <= 1 or local_y <= 1 or local_x + local_width >= width - 1 or local_y + local_height >= height - 1:
+            continue
+        rect = [float(local_x + x0), float(local_y + y0), float(local_width), float(local_height)]
+        x, y, room_width, room_height = rect
+        synthetic_lines = [
+            {"axis": "h", "coordinate": y, "start": x, "end": x + room_width, "thickness": 5.0, "gaps": [],
+             "evidence_bbox": [x, y, room_width, 5]},
+            {"axis": "h", "coordinate": y + room_height, "start": x, "end": x + room_width, "thickness": 5.0, "gaps": [],
+             "evidence_bbox": [x, y + room_height, room_width, 5]},
+            {"axis": "v", "coordinate": x, "start": y, "end": y + room_height, "thickness": 5.0, "gaps": [],
+             "evidence_bbox": [x, y, 5, room_height]},
+            {"axis": "v", "coordinate": x + room_width, "start": y, "end": y + room_height, "thickness": 5.0, "gaps": [],
+             "evidence_bbox": [x + room_width, y, 5, room_height]},
+        ]
+        faces.append({"rect": rect, "lines": synthetic_lines, "provenance": "roi_structural_component",
+                      "confidence": 0.45, "component_area": area})
+    faces.sort(key=lambda item: (item["rect"][1], item["rect"][0]))
+    return faces
+
+
 def _recognize(asset: BitmapAsset) -> dict[str, Any]:
     gray, binary = _binary(asset)
     minimum = max(13, int(min(asset.width, asset.height) * 0.12)) | 1
@@ -401,6 +475,18 @@ def _recognize(asset: BitmapAsset) -> dict[str, Any]:
             ox, oy, ow, oh = other["rect"]
             if min(x + width, ox + ow) - max(x, ox) > 1 and min(y + height, oy + oh) - max(y, oy) > 1:
                 raise BitmapError("overlapping_room_candidates: manual tracing required")
+    # A large brochure ROI often yields one strict rectangle because door gaps
+    # interrupt the interior partition lines. Recover disjoint structural
+    # components before returning the one-room result in that case.
+    if len(faces) == 1 and roi_candidates:
+        component_faces = _roi_component_faces(binary, roi_candidates[0])
+        if len(component_faces) > 1:
+            faces = component_faces
+            metadata_detection = "roi_structural_components"
+        else:
+            metadata_detection = "closed_rectangle"
+    else:
+        metadata_detection = "closed_rectangle"
     used = {id(line) for face in faces for line in face["lines"]}
     unused = [line for line in lines if id(line) not in used]
     return {"faces": faces, "lines": lines, "unused": unused, "metadata": {
@@ -409,6 +495,7 @@ def _recognize(asset: BitmapAsset) -> dict[str, Any]:
         "minimum_line_length_px": minimum, "maximum_gap_px": maximum_gap,
         "mean_luma": round(float(gray.mean()), 6), "dark_ratio": round(float(np.mean(binary > 0)), 6),
         "roi_candidates": roi_candidates,
+        "room_detection": {"mode": metadata_detection, "room_candidate_count": len(faces)},
         "line_candidates": raw,
     }}
 
@@ -463,11 +550,15 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
     def length(value: float) -> float:
         return round(value * scale, 6)
 
-    def candidate(object_id: str, kind: str, pixels: dict[str, Any], geometry: dict[str, Any], bbox: list[float]) -> None:
+    def candidate(object_id: str, kind: str, pixels: dict[str, Any], geometry: dict[str, Any], bbox: list[float],
+                 evidence_source: dict[str, Any] | None = None) -> None:
+        source = evidence_source or source_ref
         candidates.append({"id": object_id, "kind": kind, "pixel_geometry": pixels, "geometry_mm": geometry,
-                           "evidence_bbox": bbox, **source_ref})
+                           "evidence_bbox": bbox, **source})
 
     for face in recognition["faces"]:
+        face_source = {**source_ref, "provenance": face.get("provenance", source_ref["provenance"]),
+                       "confidence": face.get("confidence", source_ref["confidence"])}
         boundaries = []
         for line in face["lines"]:
             identity = id(line)
@@ -478,14 +569,14 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                 x, y = (start, coordinate) if axis == "h" else (coordinate, start)
                 thickness = line["thickness"]
                 wall = {"id": wall_id, "axis": axis, "x": length(x), "y": length(y), "length": length(end - start),
-                        "thickness": length(thickness), "bottom_z": 0.0, "top_z": 2800.0, **source_ref,
+                        "thickness": length(thickness), "bottom_z": 0.0, "top_z": 2800.0, **face_source,
                         "dimension_provenance": {"source": "user_scale", "pixel_value": end - start, "world_value_mm": length(end - start),
-                                                 "source_asset_sha256": asset.sha256, "confidence": 0.8, "needs_review": True},
+                                                 "source_asset_sha256": asset.sha256, "confidence": face_source["confidence"], "needs_review": True},
                         "height_provenance": {"source": "default_unmeasured", "value_mm": 2800, "confidence": 0, "needs_review": True}}
                 walls.append(wall)
                 bbox = [x, y - thickness / 2, end - start, thickness] if axis == "h" else [x - thickness / 2, y, thickness, end - start]
                 candidate(wall_id, "wall", {"axis": axis, "x": x, "y": y, "length": end - start, "thickness": thickness},
-                          {key: wall[key] for key in ("axis", "x", "y", "length", "thickness")}, bbox)
+                          {key: wall[key] for key in ("axis", "x", "y", "length", "thickness")}, bbox, face_source)
                 for gap_start, gap_end in line["gaps"]:
                     if gap_end - gap_start <= max(2, thickness):
                         continue
@@ -497,18 +588,18 @@ def ingest_bitmap(data: bytes, *, filename: str = "upload", model_id: str | None
                     openings.append(opening)
                     obox = [gap_start, coordinate - thickness / 2, gap_end - gap_start, thickness] if axis == "h" else [coordinate - thickness / 2, gap_start, thickness, gap_end - gap_start]
                     candidate(opening_id, "opening", {"host_wall_id": wall_id, "offset": gap_start - start, "width": gap_end - gap_start},
-                              {key: opening[key] for key in ("host_wall_id", "offset", "width", "height")}, obox)
+                              {key: opening[key] for key in ("host_wall_id", "offset", "width", "height")}, obox, face_source)
                     candidates[-1].update(confidence=0.5, provenance="wall_gap_unclassified")
             boundaries.append(line_ids[identity])
         room_id = f"room-candidate-{len(rooms) + 1}"
         pixel_rect = face["rect"]
         rect = [length(value) for value in pixel_rect]
         room = {"id": room_id, "name": f"Room {len(rooms) + 1}", "kind": "unknown", "rect": rect,
-                "boundary_wall_ids": boundaries, **source_ref,
+                "boundary_wall_ids": boundaries, **face_source,
                 "dimension_provenance": {"source": "user_scale", "pixel_rect": pixel_rect, "world_rect_mm": rect,
-                                         "source_asset_sha256": asset.sha256, "confidence": 0.8, "needs_review": True}}
+                                         "source_asset_sha256": asset.sha256, "confidence": face_source["confidence"], "needs_review": True}}
         rooms.append(room)
-        candidate(room_id, "room", {"rect": pixel_rect}, {"rect": rect}, pixel_rect)
+        candidate(room_id, "room", {"rect": pixel_rect}, {"rect": rect}, pixel_rect, face_source)
     for index, room in enumerate(rooms):
         for other in rooms[index + 1:]:
             x, y, width, height = room["rect"]
