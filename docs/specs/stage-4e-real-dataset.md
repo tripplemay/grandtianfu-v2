@@ -2,6 +2,11 @@
 
 状态：实现中，当前处于数据采集准备；仓库内 manifest 仍为空，未宣称真实准确率。
 
+已收到一张用户明确授权的 PNG 候选图，intake 证据见
+`docs/test-reports/stage-4e1-authorized-intake.md`。当前算法对该复杂宣传页返回
+`no_closed_rectangle`，尚无可评测 prediction；源图保留在本机受控目录，不写入公开
+仓库。
+
 ## 边界
 
 阶段 4E-0 冻结了单张标注格式和房间 IoU 评测。本阶段只建立一批经过授权、可
