@@ -18,9 +18,9 @@
 | `uv run --frozen pytest -q` | **PASS：194 passed**，2 个第三方弃用 warning |
 | `uv run ruff check packages/ingest/ingest/bitmap.py packages/ingest/tests/test_bitmap.py` | **PASS：All checks passed** |
 | `uv run python` 直接 ingest 用户 JPEG，`mm_per_pixel=1.1`（修复后复验） | **PASS**：11 个 room、44 个 wall；`room_detection.mode=roi_structural_components`；`room_candidate_count=11` |
-| 同一 JPEG 重复 ingest 两次 | **PASS**：两次 canonical hash 均为 `ee31dab1a4cf18d3576643c9a25357d92d1e5dcf60b018057b07a482863e6ba4` |
+| 同一 JPEG 重复 ingest 两次 | **PASS**：两次 canonical hash 均为 `d10195ab9667473b836c43ca386352dd996e3b6561040119c953c42bfc5478b5` |
 | 两次结果执行 `validate_model` | **PASS** |
-| 临时 API `127.0.0.1:18765` 上传 JPEG | **PASS（HTTP）**：201；worker 工件和 manifest 正常写出 |
+| 临时 API `127.0.0.1:18765` 上传 JPEG（首轮修复前探针） | **PASS（HTTP）**：201；worker 工件和 manifest 正常写出；候选 provenance 缺口已在直接 ingest 修复后复验 |
 
 ## 直接 ingest 证据
 
@@ -30,6 +30,8 @@
 - `ingest.hard_blockers` 保留 `partial_plan_requires_manual_trace`（count 35）；没有绕过人工描图阻断。
 
 修复后两次 canonical hash 均为 `d10195ab9667473b836c43ca386352dd996e3b6561040119c953c42bfc5478b5`，且两次 `validate_model` 均通过。
+
+HTTP 探针已在首轮失败版本上确认 API -> worker -> manifest 发布链路返回 201；本轮未重新启动临时端口，修复后的候选字段以同一 worker 调用的直接 ingest 结果核对，避免将修复前 manifest 误作修复后证据。
 
 ## 首轮失败记录（已修复）
 
